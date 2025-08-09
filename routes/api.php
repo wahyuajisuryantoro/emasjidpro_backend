@@ -1,5 +1,7 @@
 <?php
 
+use App\Http\Controllers\Api\LaporanPendapatanBebanController;
+use App\Http\Controllers\Api\NeracaSaldoController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Api\AsetController;
@@ -71,11 +73,18 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/jurnal-umum', [JurnalUmumController::class, 'getJurnalUmum']);
     Route::get('/jurnal-umum/{code}', [JurnalUmumController::class, 'getDetailJurnal']);
 
+    // Route Laporan Pendapatan dan Beban
+    Route::get('/pendapatan-beban', [LaporanPendapatanBebanController::class, 'getLaporanPendapatanBeban']);
+    // Route Buku Besar
     Route::get('/buku-besar/account', [BukuBesarController::class, 'getAccountBukuBesar']);
     Route::get('/buku-besar/{code_account}/detail', [BukuBesarController::class, 'getBukuBesarByAccount']);
 
+    // Route Neraca Saldo
+    Route::get('/neraca-saldo', [NeracaSaldoController::class, 'getNeracaSaldo']);
+
     // Route Kas dan Bank
     Route::get('/dashboard-kasdanbank', [KasdanBankController::class, 'getDashboardKasdanBank']);
+    Route::get('/all-kasdanbank', [KasdanBankController::class, 'getAllDataKasdanBank']);
     Route::get('/accounts-kasdanbank', [KasdanBankController::class, 'getAccountsForKasdanBank']);
     Route::get('/bank-accounts-transfer', [KasdanBankController::class, 'getBankAccountsForTransfer']);
     Route::post('/laporan-kasdanbank', [KasdanBankController::class, 'getLaporanKasdanBankBulanan']);

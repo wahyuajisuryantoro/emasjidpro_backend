@@ -1676,14 +1676,12 @@ class AsetController extends Controller
     }
 
     // DOCUMENT HANDLER
-    // Tambahkan method ini di AsetController
 
     public function uploadAssetDocument(Request $request, $no)
     {
         try {
             $username = auth()->user()->username;
 
-            // Check if file exists
             if (!$request->hasFile('document')) {
                 return response()->json([
                     'success' => false,
@@ -1693,7 +1691,6 @@ class AsetController extends Controller
 
             $file = $request->file('document');
 
-            // Check if file is valid and allowed type
             $allowedTypes = ['application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'image/jpeg', 'image/png', 'image/jpg'];
 
             if (!$file->isValid() || !in_array($file->getMimeType(), $allowedTypes)) {
@@ -1703,7 +1700,6 @@ class AsetController extends Controller
                 ], 422);
             }
 
-            // Check file size (max 10MB)
             if ($file->getSize() > 10 * 1024 * 1024) {
                 return response()->json([
                     'success' => false,
@@ -1727,7 +1723,7 @@ class AsetController extends Controller
             DB::beginTransaction();
 
             try {
-                // Upload document
+
                 $filename = 'aset_documents/' . $username . '/' . $asset->code . '_' . Str::uuid() . '.' . $file->getClientOriginalExtension();
 
                 $uploaded = Storage::disk('gcs')->put($filename, file_get_contents($file->path()), [
@@ -1738,7 +1734,6 @@ class AsetController extends Controller
                     throw new \Exception('Upload gagal ke Google Cloud Storage');
                 }
 
-                // Update asset record with document path
                 $currentAttachment = $asset->attachment;
                 $newAttachment = $currentAttachment ? $currentAttachment . ',' . $filename : $filename;
 
@@ -1751,10 +1746,8 @@ class AsetController extends Controller
 
                 DB::commit();
 
-                // Generate document URL
                 $documentUrl = GoogleCloudStorageHelper::getFileUrl($filename);
 
-                // Add notification
                 DB::table('notifications')->insert([
                     'username' => $username,
                     'title' => 'Dokumen Aset Berhasil Diupload',
@@ -1801,7 +1794,6 @@ class AsetController extends Controller
         try {
             $username = auth()->user()->username;
 
-            // Check if file exists
             if (!$request->hasFile('document')) {
                 return response()->json([
                     'success' => false,
@@ -1811,7 +1803,6 @@ class AsetController extends Controller
 
             $file = $request->file('document');
 
-            // Check if file is valid and allowed type
             $allowedTypes = ['application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'image/jpeg', 'image/png', 'image/jpg'];
 
             if (!$file->isValid() || !in_array($file->getMimeType(), $allowedTypes)) {
@@ -1821,7 +1812,6 @@ class AsetController extends Controller
                 ], 422);
             }
 
-            // Check file size (max 10MB)
             if ($file->getSize() > 10 * 1024 * 1024) {
                 return response()->json([
                     'success' => false,
@@ -1842,7 +1832,6 @@ class AsetController extends Controller
                 ], 404);
             }
 
-            // Parse current attachments
             $attachments = $asset->attachment ? explode(',', $asset->attachment) : [];
 
             if (!isset($attachments[$documentIndex])) {
@@ -1855,7 +1844,6 @@ class AsetController extends Controller
             DB::beginTransaction();
 
             try {
-                // Upload new document
                 $filename = 'aset_documents/' . $username . '/' . $asset->code . '_' . Str::uuid() . '.' . $file->getClientOriginalExtension();
 
                 $uploaded = Storage::disk('gcs')->put($filename, file_get_contents($file->path()), [
@@ -1866,7 +1854,6 @@ class AsetController extends Controller
                     throw new \Exception('Upload gagal ke Google Cloud Storage');
                 }
 
-                // Delete old document if exists
                 if ($attachments[$documentIndex]) {
                     try {
                         Storage::disk('gcs')->delete($attachments[$documentIndex]);
@@ -1875,10 +1862,8 @@ class AsetController extends Controller
                     }
                 }
 
-                // Update attachments array
                 $attachments[$documentIndex] = $filename;
 
-                // Update asset record
                 DB::table('keu_asset')
                     ->where('no', $no)
                     ->where('username', $username)
@@ -1888,10 +1873,8 @@ class AsetController extends Controller
 
                 DB::commit();
 
-                // Generate document URL
                 $documentUrl = GoogleCloudStorageHelper::getFileUrl($filename);
 
-                // Add notification
                 DB::table('notifications')->insert([
                     'username' => $username,
                     'title' => 'Dokumen Aset Berhasil Diperbarui',
@@ -1952,7 +1935,6 @@ class AsetController extends Controller
                 ], 404);
             }
 
-            // Parse current attachments
             $attachments = $asset->attachment ? explode(',', $asset->attachment) : [];
 
             if (!isset($attachments[$documentIndex])) {
@@ -1967,18 +1949,14 @@ class AsetController extends Controller
             try {
                 $documentPath = $attachments[$documentIndex];
 
-                // Delete document from GCS
                 try {
                     Storage::disk('gcs')->delete($documentPath);
                 } catch (\Exception $e) {
-                    \Log::warning('Failed to delete asset document from GCS: ' . $e->getMessage());
+                   
                 }
 
-                // Remove from attachments array
                 unset($attachments[$documentIndex]);
-                $attachments = array_values($attachments); // Reindex array
-
-                // Update asset record
+                $attachments = array_values($attachments);
                 DB::table('keu_asset')
                     ->where('no', $no)
                     ->where('username', $username)

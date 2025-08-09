@@ -775,7 +775,7 @@ class HutangController extends Controller
                 'transaction_date' => 'required|date',
                 'source_account' => 'required|string',
                 'name' => 'required|string|max:50',
-                'attachment' => 'nullable|image|mimes:jpeg,png,jpg,pdf,doc,docx|max:5120', // 5MB max
+                'attachment' => 'nullable|image|mimes:jpeg,png,jpg,pdf,doc,docx|max:5120', 
             ]);
 
             if ($validator->fails()) {

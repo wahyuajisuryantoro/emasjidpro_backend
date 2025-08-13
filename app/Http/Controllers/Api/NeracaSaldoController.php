@@ -10,22 +10,22 @@ use App\Http\Controllers\Controller;
 
 class NeracaSaldoController extends Controller
 {
-    public function getNeracaSaldo(Request $request)
+   public function getNeracaSaldo(Request $request)
     {
         try {
             $username = auth()->user()->username;
-            $month = $request->input('month');
-            $year = $request->input('year');
-            $allData = $request->input('all_data', false);
-            $fromMonth = $request->input('from_month');
-            $fromYear = $request->input('from_year');
-            $toMonth = $request->input('to_month');
-            $toYear = $request->input('to_year');
-
-            // Get accounts
+            
+            // Parameter untuk mengontrol integrasi data hutang/piutang
+            $includeSystemDebt = $request->input('include_system_debt', true); // default true
+            $includeSystemReceivable = $request->input('include_system_receivable', true); // default true
+            
+            // Get accounts - hanya akun untuk neraca (NL dan NR)
             $accounts = DB::table('keu_account as a')
                 ->join('keu_account_category as c', 'a.code_account_category', '=', 'c.code')
-                ->where('a.username', $username)
+                ->where(function($query) use ($username) {
+                    $query->where('a.username', $username)
+                          ->orWhere('a.username', '');
+                })
                 ->where('a.publish', '1')
                 ->whereIn('c.type', ['NL', 'NR'])
                 ->select(
@@ -36,49 +36,83 @@ class NeracaSaldoController extends Controller
                 ->orderBy('a.code', 'asc')
                 ->get();
 
-            // Get journal data with date filter
-            $journalQuery = JurnalKeuanganModel::where('username', $username)
-                ->where('publish', '1');
-
-            if ($allData == 'true' || $allData == true) {
-                // No date filter for all data
-            } elseif ($fromMonth && $fromYear && $toMonth && $toYear) {
-                $startDate = Carbon::createFromDate($fromYear, $fromMonth, 1)->startOfMonth();
-                $endDate = Carbon::createFromDate($toYear, $toMonth, 1)->endOfMonth();
-                $journalQuery->whereBetween('date_transaction', [$startDate, $endDate]);
-            } elseif ($month && $year) {
-                $journalQuery->whereYear('date_transaction', $year)
-                    ->whereMonth('date_transaction', $month);
-            } else {
-                $journalQuery->whereYear('date_transaction', date('Y'))
-                    ->whereMonth('date_transaction', date('m'));
-            }
-
-            $journals = $journalQuery->get();
+            // Get journal data dari awal tahun sampai hari ini
+            // PERBAIKAN: Exclude jurnal hutang/piutang untuk menghindari double counting
+            $startOfYear = Carbon::createFromDate(date('Y'), 1, 1)->startOfDay();
+            $today = Carbon::now()->endOfDay();
+            
+            // Ambil semua kode transaksi hutang dan piutang
+            $hutangCodes = DB::table('keu_debt')
+                ->where(function($query) use ($username) {
+                    $query->where('username', $username)
+                          ->orWhere('username', '');
+                })
+                ->where('publish', '1')
+                ->pluck('code')
+                ->toArray();
+                
+            $piutangCodes = DB::table('keu_receivable')
+                ->where(function($query) use ($username) {
+                    $query->where('username', $username)
+                          ->orWhere('username', '');
+                })
+                ->where('publish', '1')
+                ->pluck('code')
+                ->toArray();
+                
+            $cicilanHutangCodes = DB::table('keu_debt_installment')
+                ->where(function($query) use ($username) {
+                    $query->where('username', $username)
+                          ->orWhere('username', '');
+                })
+                ->where('publish', '1')
+                ->pluck('code')
+                ->toArray();
+                
+            $cicilanPiutangCodes = DB::table('keu_receivable_installment')
+                ->where(function($query) use ($username) {
+                    $query->where('user', $username)
+                          ->orWhere('user', '');
+                })
+                ->where('publish', '1')
+                ->pluck('code')
+                ->toArray();
+            
+            // Gabungkan semua kode yang harus di-exclude
+            $excludeCodes = array_merge($hutangCodes, $piutangCodes, $cicilanHutangCodes, $cicilanPiutangCodes);
+            
+            $journals = DB::table('keu_journal')
+                ->where(function($query) use ($username) {
+                    $query->where('username', $username)
+                          ->orWhere('username', '');
+                })
+                ->where('publish', '1')
+                ->whereBetween('date_transaction', [$startOfYear, $today])
+                ->whereNotIn('code', $excludeCodes) // EXCLUDE jurnal hutang/piutang
+                ->get();
+            
             $journalsByAccount = $journals->groupBy('account');
 
-            // Get assets data for Aktiva Tetap
-            $assetsQuery = DB::table('keu_asset')
-                ->where('username', $username)
-                ->where('publish', '1');
-
-            // Apply same date filter to assets
-            if ($allData == 'true' || $allData == true) {
-                // No date filter for all data
-            } elseif ($fromMonth && $fromYear && $toMonth && $toYear) {
-                $startDate = Carbon::createFromDate($fromYear, $fromMonth, 1)->startOfMonth();
-                $endDate = Carbon::createFromDate($toYear, $toMonth, 1)->endOfMonth();
-                $assetsQuery->whereBetween('date_purchase', [$startDate, $endDate]);
-            } elseif ($month && $year) {
-                $assetsQuery->whereYear('date_purchase', $year)
-                    ->whereMonth('date_purchase', $month);
-            } else {
-                $assetsQuery->whereYear('date_purchase', date('Y'))
-                    ->whereMonth('date_purchase', date('m'));
-            }
-
-            $assets = $assetsQuery->get();
+            // Get assets data for Aktiva Tetap - ambil SEMUA aset (tidak ada filter periode)
+            $assets = DB::table('keu_asset')
+                ->where(function($query) use ($username) {
+                    $query->where('username', $username)
+                          ->orWhere('username', '');
+                })
+                ->where('publish', '1')
+                ->get();
+                
             $assetsByAccount = $assets->groupBy('account_related');
+
+            // GET HUTANG DATA - Ambil data hutang aktual dari tabel keu_debt
+            $dataHutang = $this->getHutangData($username);
+            
+            // GET PIUTANG DATA - Ambil data piutang aktual dari tabel keu_receivable
+            $dataPiutang = $this->getPiutangData($username);
+
+            // DETEKSI AKUN PIUTANG DAN HUTANG SECARA DINAMIS
+            $piutangAccounts = $this->detectPiutangAccounts($username);
+            $hutangAccounts = $this->detectHutangAccounts($username);
 
             $neracaData = [
                 'aktiva_lancar' => [],
@@ -93,48 +127,71 @@ class NeracaSaldoController extends Controller
             foreach ($accounts as $account) {
                 $accountCode = $account->code;
                 $saldoAwal = $account->balance;
+                
+                // Get journals for this account
                 $accountJournals = $journalsByAccount->get($accountCode, collect());
-
+                
+                // Calculate total debit and credit for this account
                 $totalDebit = $accountJournals->where('status', 'debit')->sum('value');
                 $totalCredit = $accountJournals->where('status', 'credit')->sum('value');
 
                 // Calculate balance based on account type
                 if ($account->category_type == 'NL') { // Aktiva
-                    // NL (Aktiva): saldo_awal + debit - credit
-                    $saldoAkhir = $saldoAwal + $totalDebit - $totalCredit;
-
-                    // For Aktiva Tetap (category 2), add asset values
-                    if ($account->code_account_category == '2') {
+                    if ($account->code_account_category == '2') { 
+                        // Aktiva Tetap - ambil dari keu_asset berdasarkan account_related
                         $accountAssets = $assetsByAccount->get($accountCode, collect());
                         $totalAssetValue = $accountAssets->sum('value');
                         $totalDepreciation = $accountAssets->sum('depreciation');
-                        $netAssetValue = $totalAssetValue - $totalDepreciation;
-                        $saldoAkhir += $netAssetValue;
-                    }
-
-                    $totalLeft += $saldoAkhir;
-
-                    if ($account->code_account_category == '1') { // Aktiva Lancar
-                        $neracaData['aktiva_lancar'][] = [
-                            'account_code' => $accountCode,
-                            'account_name' => $account->name,
-                            'saldo_akhir' => $saldoAkhir,
-                            'formatted_saldo_akhir' => 'Rp ' . number_format($saldoAkhir, 0, ',', '.'),
-                        ];
-                    } elseif ($account->code_account_category == '2') { // Aktiva Tetap
+                        $saldoAkhir = $totalAssetValue - $totalDepreciation;
+                        
                         $neracaData['aktiva_tetap'][] = [
                             'account_code' => $accountCode,
                             'account_name' => $account->name,
                             'saldo_akhir' => $saldoAkhir,
                             'formatted_saldo_akhir' => 'Rp ' . number_format($saldoAkhir, 0, ',', '.'),
                         ];
+                    } else {
+                        // Aktiva Lancar - hitung dari saldo awal + mutasi jurnal
+                        $saldoAkhir = $saldoAwal + $totalDebit - $totalCredit;
+                        
+                        // TAMBAHAN: Jika ada aset yang salah menunjuk ke akun aktiva lancar
+                        $accountAssets = $assetsByAccount->get($accountCode, collect());
+                        if ($accountAssets->count() > 0) {
+                            $totalAssetValue = $accountAssets->sum('value');
+                            $totalDepreciation = $accountAssets->sum('depreciation');
+                            $netAssetValue = $totalAssetValue - $totalDepreciation;
+                            $saldoAkhir += $netAssetValue;
+                        }
+                        
+                        // DINAMIS: Handle piutang dengan deteksi konflik
+                        if (in_array($accountCode, $piutangAccounts) && $includeSystemReceivable) {
+                            // SELALU gunakan data system untuk akun piutang
+                            // karena jurnal piutang sudah di-exclude
+                            $saldoAkhir += $dataPiutang['total_piutang_bersih'];
+                        }
+                        
+                        $neracaData['aktiva_lancar'][] = [
+                            'account_code' => $accountCode,
+                            'account_name' => $account->name,
+                            'saldo_akhir' => $saldoAkhir,
+                            'formatted_saldo_akhir' => 'Rp ' . number_format($saldoAkhir, 0, ',', '.'),
+                        ];
                     }
-                } else { // NR (Pasiva)
+                    
+                    $totalLeft += $saldoAkhir;
+                    
+                } else { // NR (Pasiva) - semua dihitung dari jurnal
                     // NR (Pasiva): saldo_awal + credit - debit
                     $saldoAkhir = $saldoAwal + $totalCredit - $totalDebit;
-                    $totalRight += $saldoAkhir;
-
+                    
+                    // DINAMIS: Handle hutang dengan deteksi konflik
                     if ($account->code_account_category == '3') { // Kewajiban
+                        if (isset($hutangAccounts[$accountCode]) && $includeSystemDebt) {
+                            // SELALU gunakan data system untuk akun hutang
+                            // karena jurnal hutang sudah di-exclude
+                            $saldoAkhir += $hutangAccounts[$accountCode];
+                        }
+                        
                         $neracaData['kewajiban'][] = [
                             'account_code' => $accountCode,
                             'account_name' => $account->name,
@@ -149,6 +206,8 @@ class NeracaSaldoController extends Controller
                             'formatted_saldo_akhir' => 'Rp ' . number_format($saldoAkhir, 0, ',', '.'),
                         ];
                     }
+                    
+                    $totalRight += $saldoAkhir;
                 }
             }
 
@@ -169,22 +228,144 @@ class NeracaSaldoController extends Controller
                     'formatted_total_right' => 'Rp ' . number_format($totalRight, 0, ',', '.'),
                     'total_accounts_left' => $totalAccountsLeft,
                     'total_accounts_right' => $totalAccountsRight,
-                    'selected_month' => $month ? (int) $month : null,
-                    'selected_year' => $year ? (int) $year : null,
-                    'period_info' => $this->getPeriodInfo($request),
+                    'period_info' => 'Per ' . Carbon::now()->format('d F Y'),
+                    
                 ],
-                'message' => 'Data neraca saldo berhasil dimuat'
+                'message' => 'Data neraca berhasil dimuat'
             ], 200);
 
         } catch (\Exception $e) {
             return response()->json([
                 'success' => false,
-                'message' => 'Gagal memuat data neraca saldo: ' . $e->getMessage(),
+                'message' => 'Gagal memuat data neraca: ' . $e->getMessage(),
                 'error_detail' => $e->getTraceAsString()
             ], 500);
         }
     }
 
+    /**
+     * Deteksi akun piutang secara dinamis berdasarkan data aktual di keu_receivable
+     */
+    private function detectPiutangAccounts($username)
+    {
+        // Ambil semua akun yang digunakan di tabel keu_receivable
+        $piutangAccounts = DB::table('keu_receivable')
+            ->where('username', $username)
+            ->where('publish', '1')
+            ->pluck('account')
+            ->unique()
+            ->values()
+            ->toArray();
+
+        return $piutangAccounts;
+    }
+
+    /**
+     * Deteksi akun hutang secara dinamis dan hitung sisa hutang per akun
+     */
+    private function detectHutangAccounts($username)
+    {
+        // Ambil data hutang dan kelompokkan per akun
+        $dataHutang = DB::table('keu_debt')
+            ->select('code', 'value', 'account')
+            ->where('username', $username)
+            ->where('status', 'debit')
+            ->where('publish', '1')
+            ->get();
+
+        $hutangPerAkun = [];
+
+        foreach ($dataHutang as $hutang) {
+            // Hitung pembayaran yang sudah dilakukan
+            $pembayaran = DB::table('keu_debt_installment')
+                ->where('username', $username)
+                ->where('code_debt', $hutang->code)
+                ->where('publish', '1')
+                ->sum('value');
+
+            $sisaHutang = $hutang->value - $pembayaran;
+            
+            // Kelompokkan per akun
+            if (!isset($hutangPerAkun[$hutang->account])) {
+                $hutangPerAkun[$hutang->account] = 0;
+            }
+            $hutangPerAkun[$hutang->account] += $sisaHutang;
+        }
+
+        return $hutangPerAkun;
+    }
+
+    /**
+     * Hitung total hutang untuk keperluan debug dan informasi umum
+     */
+    private function getHutangData($username)
+    {
+        // Ambil semua data hutang
+        $dataHutang = DB::table('keu_debt')
+            ->select('code', 'value', 'account')
+            ->where('username', $username)
+            ->where('status', 'debit')
+            ->where('publish', '1')
+            ->get();
+
+        $totalHutangBruto = 0;
+        $totalHutangTerbayar = 0;
+
+        foreach ($dataHutang as $hutang) {
+            $totalHutangBruto += $hutang->value;
+
+            // Hitung pembayaran yang sudah dilakukan
+            $pembayaran = DB::table('keu_debt_installment')
+                ->where('username', $username)
+                ->where('code_debt', $hutang->code)
+                ->where('publish', '1')
+                ->sum('value');
+
+            $totalHutangTerbayar += $pembayaran;
+        }
+
+        return [
+            'total_hutang_bruto' => $totalHutangBruto,
+            'total_hutang_terbayar' => $totalHutangTerbayar,
+            'total_hutang_bersih' => $totalHutangBruto - $totalHutangTerbayar,
+        ];
+    }
+
+    /**
+     * Hitung total piutang untuk keperluan debug dan informasi umum
+     */
+    private function getPiutangData($username)
+    {
+        // Ambil semua data piutang
+        $dataPiutang = DB::table('keu_receivable')
+            ->select('code', 'value')
+            ->where('username', $username)
+            ->where('status', 'debit')
+            ->where('publish', '1')
+            ->get();
+
+        $totalPiutangBruto = 0;
+        $totalPiutangTerbayar = 0;
+
+        foreach ($dataPiutang as $piutang) {
+            $totalPiutangBruto += $piutang->value;
+
+            // Hitung pembayaran yang sudah diterima
+            $pembayaran = DB::table('keu_receivable_installment')
+                ->where('user', $username)
+                ->where('code_receivable', $piutang->code)
+                ->where('publish', '1')
+                ->sum('value');
+
+            $totalPiutangTerbayar += $pembayaran;
+        }
+
+        return [
+            'total_piutang_bruto' => $totalPiutangBruto,
+            'total_piutang_terbayar' => $totalPiutangTerbayar,
+            'total_piutang_bersih' => $totalPiutangBruto - $totalPiutangTerbayar,
+        ];
+    }
 
     private function getPeriodInfo($request)
     {

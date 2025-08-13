@@ -623,7 +623,7 @@ class HutangController extends Controller
                 'due_date' => 'required|date',
                 'source_account' => 'required|string',
                 'destination_account' => 'required|string',
-                'attachment' => 'nullable|image|mimes:jpeg,png,jpg,pdf,doc,docx|max:5120', // 5MB max
+                'attachment' => 'nullable|image|mimes:jpeg,png,jpg,pdf,doc,docx|max:5120',
             ]);
 
             if ($validator->fails()) {
@@ -635,7 +635,34 @@ class HutangController extends Controller
             }
 
             $username = auth()->user()->username;
+            $userName = auth()->user()->name ?? 'system';
             $subdomain = auth()->user()->subdomain ?? '';
+
+            $sourceAccount = DB::table('keu_account')
+                ->where('username', $username)
+                ->where('code', $request->source_account)
+                ->where('code', 'like', '3%')
+                ->first();
+
+            if (!$sourceAccount) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Akun hutang tidak valid (harus akun kewajiban 3xx)'
+                ], 404);
+            }
+            $destinationAccount = DB::table('keu_account')
+                ->where('username', $username)
+                ->where('code', $request->destination_account)
+                ->where('code', 'like', '1%')
+                ->where('related', '1')
+                ->first();
+
+            if (!$destinationAccount) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Akun kas/bank tidak valid'
+                ], 404);
+            }
 
             $lastHutang = DB::table('keu_debt')
                 ->where('username', $username)
@@ -654,25 +681,6 @@ class HutangController extends Controller
             $newNumber = $lastNumber + 1;
             $code = 'D' . str_pad($newNumber, 3, '0', STR_PAD_LEFT);
 
-            $hutangData = [
-                'username' => $username,
-                'subdomain' => $subdomain,
-                'code' => $code,
-                'user' => $username,
-                'status' => 'debit',
-                'account_category' => substr($request->source_account, 0, 1),
-                'account' => $request->source_account,
-                'account_related' => $request->destination_account,
-                'name' => $request->name,
-                'link' => strtolower(str_replace(' ', '-', $request->name)),
-                'description' => $request->description,
-                'value' => $request->amount,
-                'date_deadline' => date('Y-m-d', strtotime($request->due_date)),
-                'date_transaction' => date('Y-m-d', strtotime($request->transaction_date)),
-                'date' => now(),
-                'publish' => '1'
-            ];
-            $attachmentPath = '';
             $attachmentPath = '';
             if ($request->hasFile('attachment')) {
                 $file = $request->file('attachment');
@@ -686,74 +694,125 @@ class HutangController extends Controller
                     $attachmentPath = $filename;
                 }
             }
-            if ($attachmentPath) {
-                $hutangData['attachment'] = $attachmentPath;
-            }
 
-            $hutangId = DB::table('keu_debt')->insertGetId($hutangData);
-            DB::table('notifications')->insert([
-                'username' => $username,
-                'title' => 'Hutang Baru Ditambahkan',
-                'message' => sprintf(
-                    'Hutang "%s" sebesar %s berhasil dicatat pada %s. Jatuh tempo: %s. Kode hutang: %s',
-                    $request->name,
-                    'Rp ' . number_format($request->amount, 0, ',', '.'),
-                    Carbon::parse($request->transaction_date)->locale('id')->translatedFormat('d F Y'),
-                    Carbon::parse($request->due_date)->locale('id')->translatedFormat('d F Y'),
-                    $code
-                ),
-                'is_read' => '0',
-                'icon' => 'hand_coin_line',
-                'priority' => $request->amount >= 5000000 ? 'high' : 'normal',
-                'date' => now(),
-                'publish' => '1'
-            ]);
+            DB::beginTransaction();
 
-            $hutang = DB::table('keu_debt')
-                ->where('no', $hutangId)
-                ->first();
-
-            $sourceAccountInfo = DB::table('keu_account')
-                ->where('code', $request->source_account)
-                ->where('username', $username)
-                ->first();
-
-            $destinationAccountInfo = DB::table('keu_account')
-                ->where('code', $request->destination_account)
-                ->where('username', $username)
-                ->first();
-
-            $attachmentUrl = null;
-            if ($attachmentPath) {
-                $attachmentUrl = GoogleCloudStorageHelper::getFileUrl($attachmentPath);
-            }
-
-            $response = [
-                'success' => true,
-                'data' => [
-                    'id' => $hutangId,
+            try {
+                // Insert ke keu_debt
+                $hutangData = [
+                    'username' => $username,
+                    'subdomain' => $subdomain,
                     'code' => $code,
+                    'user' => $userName,
+                    'status' => 'debit',
+                    'account_category' => substr($request->source_account, 0, 1),
+                    'account' => $request->source_account,
+                    'account_related' => $request->destination_account,
                     'name' => $request->name,
+                    'link' => strtolower(str_replace(' ', '-', $request->name)),
                     'description' => $request->description,
-                    'amount' => $request->amount,
-                    'formatted_amount' => 'Rp ' . number_format($request->amount, 0, ',', '.'),
-                    'transaction_date' => date('d M Y', strtotime($request->transaction_date)),
-                    'due_date' => date('d M Y', strtotime($request->due_date)),
-                    'source_account' => [
-                        'code' => $request->source_account,
-                        'name' => $sourceAccountInfo ? $sourceAccountInfo->name : 'Unknown'
-                    ],
-                    'destination_account' => [
-                        'code' => $request->destination_account,
-                        'name' => $destinationAccountInfo ? $destinationAccountInfo->name : 'Unknown'
-                    ],
-                    'attachment' => $attachmentUrl,
-                    'status' => 'Belum Lunas'
-                ],
-                'message' => 'Hutang berhasil ditambahkan'
-            ];
+                    'value' => $request->amount,
+                    'date_deadline' => date('Y-m-d', strtotime($request->due_date)),
+                    'date_transaction' => date('Y-m-d', strtotime($request->transaction_date)),
+                    'date' => now(),
+                    'publish' => '1'
+                ];
 
-            return response()->json($response, 201);
+                if ($attachmentPath) {
+                    $hutangData['attachment'] = $attachmentPath;
+                }
+
+                $hutangId = DB::table('keu_debt')->insertGetId($hutangData);
+
+                // Buat jurnal otomatis
+                // Jurnal: Kas/Bank (Debit) - Hutang (Credit)
+                // Debit: Kas/Bank bertambah
+                DB::table('keu_journal')->insert([
+                    'username' => $username,
+                    'subdomain' => $subdomain,
+                    'code' => $code,
+                    'user' => $userName,
+                    'status' => 'debit',
+                    'account' => $request->destination_account,
+                    'name' => $destinationAccount->name,
+                    'description' => $request->description,
+                    'value' => $request->amount,
+                    'date_transaction' => date('Y-m-d', strtotime($request->transaction_date)),
+                    'date' => now(),
+                    'publish' => '1'
+                ]);
+
+                // Credit: Hutang bertambah
+                DB::table('keu_journal')->insert([
+                    'username' => $username,
+                    'subdomain' => $subdomain,
+                    'code' => $code,
+                    'user' => $userName,
+                    'status' => 'credit',
+                    'account' => $request->source_account,
+                    'name' => $sourceAccount->name,
+                    'description' => $request->description,
+                    'value' => $request->amount,
+                    'date_transaction' => date('Y-m-d', strtotime($request->transaction_date)),
+                    'date' => now(),
+                    'publish' => '1'
+                ]);
+
+                DB::commit();
+
+                // Notifikasi
+                DB::table('notifications')->insert([
+                    'username' => $username,
+                    'title' => 'Hutang Baru Ditambahkan',
+                    'message' => sprintf(
+                        'Hutang "%s" sebesar %s berhasil dicatat pada %s. Jatuh tempo: %s. Kode hutang: %s',
+                        $request->name,
+                        'Rp ' . number_format($request->amount, 0, ',', '.'),
+                        Carbon::parse($request->transaction_date)->locale('id')->translatedFormat('d F Y'),
+                        Carbon::parse($request->due_date)->locale('id')->translatedFormat('d F Y'),
+                        $code
+                    ),
+                    'is_read' => '0',
+                    'icon' => 'hand_coin_line',
+                    'priority' => $request->amount >= 5000000 ? 'high' : 'normal',
+                    'date' => now(),
+                    'publish' => '1'
+                ]);
+
+                $attachmentUrl = null;
+                if ($attachmentPath) {
+                    $attachmentUrl = GoogleCloudStorageHelper::getFileUrl($attachmentPath);
+                }
+
+                return response()->json([
+                    'success' => true,
+                    'data' => [
+                        'id' => $hutangId,
+                        'code' => $code,
+                        'name' => $request->name,
+                        'description' => $request->description,
+                        'amount' => $request->amount,
+                        'formatted_amount' => 'Rp ' . number_format($request->amount, 0, ',', '.'),
+                        'transaction_date' => date('d M Y', strtotime($request->transaction_date)),
+                        'due_date' => date('d M Y', strtotime($request->due_date)),
+                        'source_account' => [
+                            'code' => $request->source_account,
+                            'name' => $sourceAccount->name
+                        ],
+                        'destination_account' => [
+                            'code' => $request->destination_account,
+                            'name' => $destinationAccount->name
+                        ],
+                        'attachment' => $attachmentUrl,
+                        'status' => 'Belum Lunas'
+                    ],
+                    'message' => 'Hutang berhasil ditambahkan dengan jurnal otomatis'
+                ], 201);
+
+            } catch (\Exception $e) {
+                DB::rollBack();
+                throw $e;
+            }
 
         } catch (\Exception $e) {
             return response()->json([
@@ -773,9 +832,9 @@ class HutangController extends Controller
                 'amount' => 'required|numeric|min:1',
                 'description' => 'required|string|max:200',
                 'transaction_date' => 'required|date',
-                'source_account' => 'required|string',
+                'source_account' => 'required|string', // Kas/Bank (1xx)
                 'name' => 'required|string|max:50',
-                'attachment' => 'nullable|image|mimes:jpeg,png,jpg,pdf,doc,docx|max:5120', 
+                'attachment' => 'nullable|image|mimes:jpeg,png,jpg,pdf,doc,docx|max:5120',
             ]);
 
             if ($validator->fails()) {
@@ -787,6 +846,7 @@ class HutangController extends Controller
             }
 
             $username = auth()->user()->username;
+            $userName = auth()->user()->name ?? 'system';
             $subdomain = auth()->user()->subdomain ?? '';
 
             $hutang = DB::table('keu_debt')
@@ -802,14 +862,29 @@ class HutangController extends Controller
                 ], 404);
             }
 
+            // Validasi akun kas/bank
+            $sourceAccount = DB::table('keu_account')
+                ->where('username', $username)
+                ->where('code', $request->source_account)
+                ->where('code', 'like', '1%')
+                ->where('related', '1')
+                ->first();
+
+            if (!$sourceAccount) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Akun kas/bank tidak valid'
+                ], 404);
+            }
+
+            // Validasi sisa hutang
             $totalCicilan = DB::table('keu_debt_installment')
                 ->where('username', $username)
                 ->where('code_debt', $request->hutang_code)
                 ->where('publish', '1')
                 ->sum('value');
 
-            $totalHutang = $hutang->value;
-            $sisaHutang = $totalHutang - $totalCicilan;
+            $sisaHutang = $hutang->value - $totalCicilan;
 
             if ($request->amount > $sisaHutang) {
                 return response()->json([
@@ -839,6 +914,7 @@ class HutangController extends Controller
             $newNumber = $lastNumber + 1;
             $code = 'C' . str_pad($newNumber, 3, '0', STR_PAD_LEFT);
 
+            // Upload attachment
             $attachmentPath = '';
             if ($request->hasFile('attachment')) {
                 $file = $request->file('attachment');
@@ -853,90 +929,136 @@ class HutangController extends Controller
                 }
             }
 
-            $cicilanData = [
-                'username' => $username,
-                'subdomain' => $subdomain,
-                'code' => $code,
-                'code_debt' => $request->hutang_code,
-                'user' => $username,
-                'account_category' => substr($request->source_account, 0, 1),
-                'account' => $request->source_account,
-                'account_related' => $hutang->account_related,
-                'name' => $request->name,
-                'link' => 'pembayaran-cicilan-' . $code,
-                'description' => $request->description,
-                'value' => $request->amount,
-                'date_transaction' => date('Y-m-d', strtotime($request->transaction_date)),
-                'date' => now(),
-                'publish' => '1'
-            ];
+            DB::beginTransaction();
 
-            if ($attachmentPath) {
-                $cicilanData['attachment'] = $attachmentPath;
-            }
-
-            $cicilanId = DB::table('keu_debt_installment')->insertGetId($cicilanData);
-            $sisaHutangSetelahCicilan = $sisaHutang - $request->amount;
-            $statusHutang = $sisaHutangSetelahCicilan <= 0 ? 'LUNAS' : 'BELUM LUNAS';
-
-            DB::table('notifications')->insert([
-                'username' => $username,
-                'title' => 'Cicilan Hutang Ditambahkan',
-                'message' => sprintf(
-                    'Cicilan hutang "%s" sebesar %s berhasil dicatat pada %s. Sisa hutang: %s. Status: %s',
-                    $hutang->name,
-                    'Rp ' . number_format($request->amount, 0, ',', '.'),
-                    Carbon::parse($request->transaction_date)->locale('id')->translatedFormat('d F Y'),
-                    'Rp ' . number_format($sisaHutangSetelahCicilan, 0, ',', '.'),
-                    $statusHutang
-                ),
-                'is_read' => '0',
-                'icon' => 'money_dollar_circle_line',
-                'priority' => $sisaHutangSetelahCicilan <= 0 ? 'high' : 'normal',
-                'date' => now(),
-                'publish' => '1'
-            ]);
-
-            $newTotalCicilan = $totalCicilan + $request->amount;
-
-            $sourceAccountInfo = DB::table('keu_account')
-                ->where('code', $request->source_account)
-                ->where('username', $username)
-                ->first();
-            $attachmentUrl = null;
-            if ($attachmentPath) {
-                $attachmentUrl = GoogleCloudStorageHelper::getFileUrl($attachmentPath);
-            }
-
-            $response = [
-                'success' => true,
-                'data' => [
-                    'id' => $cicilanId,
+            try {
+                // 1. Insert cicilan
+                $cicilanData = [
+                    'username' => $username,
+                    'subdomain' => $subdomain,
                     'code' => $code,
-                    'hutang_code' => $request->hutang_code,
+                    'code_debt' => $request->hutang_code,
+                    'user' => $userName,
+                    'account_category' => substr($request->source_account, 0, 1),
+                    'account' => $request->source_account,
+                    'account_related' => $hutang->account, // Akun hutang
                     'name' => $request->name,
+                    'link' => 'pembayaran-cicilan-' . $code,
                     'description' => $request->description,
-                    'amount' => $request->amount,
-                    'formatted_amount' => 'Rp ' . number_format($request->amount, 0, ',', '.'),
-                    'transaction_date' => date('d M Y', strtotime($request->transaction_date)),
-                    'source_account' => [
-                        'code' => $request->source_account,
-                        'name' => $sourceAccountInfo ? $sourceAccountInfo->name : 'Unknown'
-                    ],
-                    'total_hutang' => $totalHutang,
-                    'formatted_total_hutang' => 'Rp ' . number_format($totalHutang, 0, ',', '.'),
-                    'total_cicilan' => $newTotalCicilan,
-                    'formatted_total_cicilan' => 'Rp ' . number_format($newTotalCicilan, 0, ',', '.'),
-                    'sisa_hutang' => $sisaHutangSetelahCicilan,
-                    'formatted_sisa_hutang' => 'Rp ' . number_format($sisaHutangSetelahCicilan, 0, ',', '.'),
-                    'status' => $sisaHutangSetelahCicilan <= 0 ? 'Lunas' : 'Belum Lunas',
-                    'attachment' => $attachmentUrl,
-                    'attachment_path' => $attachmentPath
-                ],
-                'message' => 'Cicilan berhasil ditambahkan'
-            ];
+                    'value' => $request->amount,
+                    'date_transaction' => date('Y-m-d', strtotime($request->transaction_date)),
+                    'date' => now(),
+                    'publish' => '1'
+                ];
 
-            return response()->json($response, 201);
+                if ($attachmentPath) {
+                    $cicilanData['attachment'] = $attachmentPath;
+                }
+
+                $cicilanId = DB::table('keu_debt_installment')->insertGetId($cicilanData);
+
+                // 2. PERBAIKAN: Buat jurnal otomatis untuk pembayaran cicilan
+                // Jurnal: Hutang (Debit) - Kas/Bank (Credit)
+
+                $hutangAccount = DB::table('keu_account')
+                    ->where('username', $username)
+                    ->where('code', $hutang->account)
+                    ->first();
+
+                // Debit: Hutang berkurang
+                DB::table('keu_journal')->insert([
+                    'username' => $username,
+                    'subdomain' => $subdomain,
+                    'code' => $code,
+                    'user' => $userName,
+                    'status' => 'debit',
+                    'account' => $hutang->account, // Hutang
+                    'name' => $hutangAccount ? $hutangAccount->name : 'Hutang',
+                    'description' => $request->description,
+                    'value' => $request->amount,
+                    'date_transaction' => date('Y-m-d', strtotime($request->transaction_date)),
+                    'date' => now(),
+                    'publish' => '1'
+                ]);
+
+                // Credit: Kas/Bank berkurang
+                DB::table('keu_journal')->insert([
+                    'username' => $username,
+                    'subdomain' => $subdomain,
+                    'code' => $code,
+                    'user' => $userName,
+                    'status' => 'credit',
+                    'account' => $request->source_account, // Kas/Bank
+                    'name' => $sourceAccount->name,
+                    'description' => $request->description,
+                    'value' => $request->amount,
+                    'date_transaction' => date('Y-m-d', strtotime($request->transaction_date)),
+                    'date' => now(),
+                    'publish' => '1'
+                ]);
+
+                DB::commit();
+
+                $sisaHutangSetelahCicilan = $sisaHutang - $request->amount;
+                $statusHutang = $sisaHutangSetelahCicilan <= 0 ? 'LUNAS' : 'BELUM LUNAS';
+
+                // Notifikasi
+                DB::table('notifications')->insert([
+                    'username' => $username,
+                    'title' => 'Cicilan Hutang Ditambahkan',
+                    'message' => sprintf(
+                        'Cicilan hutang "%s" sebesar %s berhasil dicatat pada %s. Sisa hutang: %s. Status: %s',
+                        $hutang->name,
+                        'Rp ' . number_format($request->amount, 0, ',', '.'),
+                        Carbon::parse($request->transaction_date)->locale('id')->translatedFormat('d F Y'),
+                        'Rp ' . number_format($sisaHutangSetelahCicilan, 0, ',', '.'),
+                        $statusHutang
+                    ),
+                    'is_read' => '0',
+                    'icon' => 'money_dollar_circle_line',
+                    'priority' => $sisaHutangSetelahCicilan <= 0 ? 'high' : 'normal',
+                    'date' => now(),
+                    'publish' => '1'
+                ]);
+
+                $newTotalCicilan = $totalCicilan + $request->amount;
+                $attachmentUrl = null;
+                if ($attachmentPath) {
+                    $attachmentUrl = GoogleCloudStorageHelper::getFileUrl($attachmentPath);
+                }
+
+                return response()->json([
+                    'success' => true,
+                    'data' => [
+                        'id' => $cicilanId,
+                        'code' => $code,
+                        'hutang_code' => $request->hutang_code,
+                        'name' => $request->name,
+                        'description' => $request->description,
+                        'amount' => $request->amount,
+                        'formatted_amount' => 'Rp ' . number_format($request->amount, 0, ',', '.'),
+                        'transaction_date' => date('d M Y', strtotime($request->transaction_date)),
+                        'source_account' => [
+                            'code' => $request->source_account,
+                            'name' => $sourceAccount->name
+                        ],
+                        'total_hutang' => $hutang->value,
+                        'formatted_total_hutang' => 'Rp ' . number_format($hutang->value, 0, ',', '.'),
+                        'total_cicilan' => $newTotalCicilan,
+                        'formatted_total_cicilan' => 'Rp ' . number_format($newTotalCicilan, 0, ',', '.'),
+                        'sisa_hutang' => $sisaHutangSetelahCicilan,
+                        'formatted_sisa_hutang' => 'Rp ' . number_format($sisaHutangSetelahCicilan, 0, ',', '.'),
+                        'status' => $sisaHutangSetelahCicilan <= 0 ? 'Lunas' : 'Belum Lunas',
+                        'attachment' => $attachmentUrl,
+                        'attachment_path' => $attachmentPath
+                    ],
+                    'message' => 'Cicilan berhasil ditambahkan dengan jurnal otomatis'
+                ], 201);
+
+            } catch (\Exception $e) {
+                DB::rollBack();
+                throw $e;
+            }
 
         } catch (\Exception $e) {
             return response()->json([

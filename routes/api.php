@@ -24,6 +24,7 @@ Route::post('/login', [AuthController::class, 'login']);
 Route::middleware('auth:sanctum')->group(function () {
     Route::post('/logout', [AuthController::class, 'logout']);
     Route::get('/data-masjid', [HomeController::class, 'getDataMasjid']);
+     Route::get('/home-data', [HomeController::class, 'getHomeData']);
     Route::get('/get-profile', [ProfileController::class, 'getProfile']);
     Route::post('/update-picture', [ProfileController::class, 'updatePictureProfile']);
     Route::post('/update-profile', [ProfileController::class, 'updateProfile']);
@@ -97,6 +98,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/aset-list', [AsetController::class, 'getAsetList']);
     Route::get('/aset/categories', [AsetController::class, 'getAssetCategories']);
     Route::get('/aset/payment-accounts', [AsetController::class, 'getPaymentAccounts']);
+    Route::get('/aset/accounts', [AsetController::class, 'getAssetAccounts']);
     Route::get('/aset/sold', [AsetController::class, 'getAllDataSellAset']);
     Route::post('/aset/buy', [AsetController::class, 'buyAset']);
     Route::post('/aset/add-categories', [AsetController::class, 'addCategoryAset']);

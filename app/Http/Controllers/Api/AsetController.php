@@ -251,175 +251,303 @@ class AsetController extends Controller
     public function buyAset(Request $request)
     {
         try {
+            $validator = Validator::make($request->all(), [
+                'name' => 'required|string|max:50',
+                'description' => 'required|string|max:200',
+                'asset_account' => 'required|string',
+                'cash_account' => 'required|string',  
+                'value' => 'required|numeric|min:1',
+                'economic_life' => 'required|integer|min:1|max:50',
+                'purchase_date' => 'required|date',
+                'brand' => 'nullable|string|max:255',
+                'vendor' => 'nullable|string|max:255',
+                'location' => 'nullable|string|max:255',
+                'no_category' => 'nullable|integer',
+                'picture' => 'nullable|mimes:jpeg,png,jpg|max:5120', // Untuk backward compatibility
+                'attachment' => 'nullable|mimes:jpeg,png,jpg,pdf,doc,docx|max:5120',
+            ]);
+
+            if ($validator->fails()) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Validasi gagal',
+                    'errors' => $validator->errors()
+                ], 422);
+            }
+
             $username = auth()->user()->username;
+            $userName = auth()->user()->name ?? 'system';
+            $subdomain = auth()->user()->subdomain ?? '';
 
-            $categoryExists = DB::table('keu_asset_category')
-                ->where('no', $request->no_category)
-                ->where('username', $username)
-                ->where('publish', '1')
-                ->exists();
+            // Debug request data
+            \Log::info('Buy Asset request data: ', $request->all());
 
-            if (!$categoryExists) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Kategori aset tidak ditemukan atau tidak valid'
-                ], 404);
+            // PERBAIKAN: Validasi kategori jika ada
+            if ($request->no_category) {
+                $categoryExists = DB::table('keu_asset_category')
+                    ->where('no', $request->no_category)
+                    ->where(function ($query) use ($username) {
+                        $query->where('username', $username)
+                            ->orWhere('username', ''); // Global categories
+                    })
+                    ->where('publish', '1')
+                    ->exists();
+
+                if (!$categoryExists) {
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'Kategori aset tidak ditemukan atau tidak valid'
+                    ], 404);
+                }
             }
 
-            $accountExists = DB::table('keu_account')
-                ->where('code', $request->account_related)
+            // PERBAIKAN: Validasi akun aset (2xx)
+            $assetAccount = DB::table('keu_account')
                 ->where('username', $username)
+                ->where('code', $request->asset_account)
+                ->where('code_account_category', '2') // Harus Aktiva Tetap
                 ->where('publish', '1')
-                ->exists();
+                ->first();
 
-            if (!$accountExists) {
+            if (!$assetAccount) {
+                \Log::error('Asset account not found: ' . $request->asset_account);
                 return response()->json([
                     'success' => false,
-                    'message' => 'Akun pembayaran tidak ditemukan atau tidak valid'
-                ], 404);
+                    'message' => 'Akun aset tidak valid. Pilih akun Aktiva Tetap (201:Tanah, 202:Bangunan, 203:Kendaraan, 204:Peralatan, 205:Perlengkapan)'
+                ], 422);
             }
+
+            // PERBAIKAN: Validasi akun kas/bank menggunakan cash_and_bank = 1
+            $cashAccount = DB::table('keu_account')
+                ->where('username', $username)
+                ->where('code', $request->cash_account)
+                ->where('code_account_category', '1') // Aktiva Lancar
+                ->where('cash_and_bank', '1') // Harus kas atau bank
+                ->where('publish', '1')
+                ->first();
+
+            if (!$cashAccount) {
+                \Log::error('Cash/Bank account not found: ' . $request->cash_account);
+
+                // Debug: Cek akun yang ada
+                $availableAccounts = DB::table('keu_account')
+                    ->where('username', $username)
+                    ->where('code_account_category', '1')
+                    ->where('publish', '1')
+                    ->get(['code', 'name', 'cash_and_bank']);
+
+                \Log::info('Available cash accounts:', $availableAccounts->toArray());
+
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Akun pembayaran tidak valid. Pilih akun Kas atau Bank yang memiliki flag cash_and_bank = 1',
+                    'available_accounts' => $availableAccounts->map(function ($acc) {
+                        return $acc->code . ' - ' . $acc->name . ' (cash_and_bank: ' . $acc->cash_and_bank . ')';
+                    })
+                ], 422);
+            }
+
+            // HILANGKAN: Validasi saldo dihapus karena tidak diperlukan
 
             DB::beginTransaction();
 
             try {
+                // Generate kode aset
                 $lastAsset = DB::table('keu_asset')
                     ->where('username', $username)
                     ->orderBy('no', 'desc')
                     ->first();
 
-                $nextNumber = 1;
-                if ($lastAsset && $lastAsset->code) {
-                    $lastNumber = (int) substr($lastAsset->code, 3);
-                    $nextNumber = $lastNumber + 1;
+                $lastNumber = 0;
+                if ($lastAsset) {
+                    $lastCode = $lastAsset->code;
+                    if (preg_match('/AST(\d+)/', $lastCode, $matches)) {
+                        $lastNumber = (int) $matches[1];
+                    }
                 }
-                $assetCode = 'AST' . str_pad($nextNumber, 3, '0', STR_PAD_LEFT);
-                $picturePath = '';
-                if ($request->hasFile('picture')) {
-                    $file = $request->file('picture');
-                    $filename = 'aset/' . $username . '/' . $assetCode . '_' . Str::uuid() . '.' . $file->getClientOriginalExtension();
+
+                $newNumber = $lastNumber + 1;
+                $code = 'AST' . str_pad($newNumber, 3, '0', STR_PAD_LEFT);
+
+                // PERBAIKAN: Handle file upload (picture atau attachment)
+                $attachmentPath = '';
+                $fileField = $request->hasFile('attachment') ? 'attachment' : 'picture';
+
+                if ($request->hasFile($fileField)) {
+                    $file = $request->file($fileField);
+                    $filename = 'aset/' . $username . '/' . $code . '_' . Str::uuid() . '.' . $file->getClientOriginalExtension();
 
                     $uploaded = Storage::disk('gcs')->put($filename, file_get_contents($file->path()), [
                         'visibility' => 'public'
                     ]);
 
                     if ($uploaded) {
-                        $picturePath = $filename;
+                        $attachmentPath = $filename;
                     }
                 }
 
+                // PERBAIKAN: Insert ke keu_asset dengan struktur yang benar
                 $assetData = [
-                    'code' => $assetCode,
-                    'user' => 'admin',
+                    'code' => $code,
+                    'user' => $userName,
                     'username' => $username,
-                    'subdomain' => $request->subdomain ?? '',
-                    'no_category' => $request->no_category,
+                    'subdomain' => $subdomain,
+                    'no_category' => $request->no_category ?? 1,
                     'status' => 'debit',
-                    'account_category' => $request->account_category,
-                    'account' => '1',
-                    'account_related' => $request->account_related,
+                    'account_category' => '2', // Aktiva Tetap
+                    'account' => $request->asset_account, // PERBAIKAN: Akun aset yang benar (2xx)
+                    'account_related' => $request->cash_account, // PERBAIKAN: Akun kas/bank (1xx)
                     'name' => $request->name,
                     'brand' => $request->brand ?? '',
                     'vendor' => $request->vendor ?? '',
-                    'link' => $request->link ?? '',
-                    'description' => $request->description ?? '',
+                    'link' => strtolower(str_replace(' ', '-', $request->name)),
+                    'description' => $request->description,
                     'value' => $request->value,
                     'depreciation' => 0,
                     'location' => $request->location ?? '',
-                    'economic_life' => 2000,
-                    'date_purchase' => $request->date_purchase,
+                    'economic_life' => $request->economic_life,
+                    'date_purchase' => date('Y-m-d', strtotime($request->purchase_date)),
                     'date_transaction' => now(),
-                    'picture' => $picturePath,
-                    'attachment' => $request->attachment ?? '',
+                    'picture' => $attachmentPath, // Backward compatibility
+                    'attachment' => $attachmentPath,
                     'publish' => '1'
                 ];
 
                 $assetId = DB::table('keu_asset')->insertGetId($assetData);
 
-                $account = DB::table('keu_account')
-                    ->where('code', $request->account_related)
-                    ->where('username', $username)
-                    ->first();
-
-                if ($account && $account->balance < $request->value) {
-                    throw new \Exception('Saldo tidak mencukupi untuk pembelian aset ini');
-                }
-
-                DB::table('keu_account')
-                    ->where('code', $request->account_related)
-                    ->where('username', $username)
-                    ->decrement('balance', $request->value);
-
-                DB::commit();
-
-                DB::table('notifications')->insert([
+                // PERBAIKAN: Buat jurnal otomatis
+                // Debit: Aset bertambah
+                DB::table('keu_journal')->insert([
                     'username' => $username,
-                    'title' => 'Aset Baru Berhasil Dibeli',
-                    'message' => sprintf(
-                        'Aset "%s" sebesar %s berhasil dibeli pada %s. Kode aset: %s',
-                        $request->name,
-                        'Rp ' . number_format($request->value, 0, ',', '.'),
-                        Carbon::parse($request->date_purchase)->locale('id')->translatedFormat('d F Y'),
-                        $assetCode
-                    ),
-                    'is_read' => '0',
-                    'icon' => 'shopping_cart_2_line',
-                    'priority' => $request->value >= 5000000 ? 'high' : 'normal',
+                    'subdomain' => $subdomain,
+                    'code' => $code,
+                    'user' => $userName,
+                    'status' => 'debit',
+                    'account' => $request->asset_account,
+                    'name' => $assetAccount->name,
+                    'description' => 'Pembelian ' . $request->name,
+                    'value' => $request->value,
+                    'date_transaction' => date('Y-m-d', strtotime($request->purchase_date)),
                     'date' => now(),
                     'publish' => '1'
                 ]);
 
-                $newAsset = DB::table('keu_asset as a')
-                    ->leftJoin('keu_asset_category as ac', 'a.no_category', '=', 'ac.no')
-                    ->leftJoin('keu_account as ar', function ($join) use ($username) {
-                        $join->on('a.account_related', '=', 'ar.code')
-                            ->where('ar.username', '=', $username);
-                    })
-                    ->select(
-                        'a.*',
-                        'ac.name as category_name',
-                        'ar.name as account_name'
-                    )
-                    ->where('a.no', $assetId)
-                    ->first();
+                // Credit: Kas/Bank berkurang
+                DB::table('keu_journal')->insert([
+                    'username' => $username,
+                    'subdomain' => $subdomain,
+                    'code' => $code,
+                    'user' => $userName,
+                    'status' => 'credit',
+                    'account' => $request->cash_account,
+                    'name' => $cashAccount->name,
+                    'description' => 'Pembelian ' . $request->name,
+                    'value' => $request->value,
+                    'date_transaction' => date('Y-m-d', strtotime($request->purchase_date)),
+                    'date' => now(),
+                    'publish' => '1'
+                ]);
 
-                $pictureUrl = null;
-                if ($picturePath) {
-                    $pictureUrl = GoogleCloudStorageHelper::getFileUrl($picturePath);
+                // DIHAPUS: Tidak update saldo di akun keuangan, biarkan saja sesuai permintaan
+
+                DB::commit();
+
+                // Notifikasi
+                DB::table('notifications')->insert([
+                    'username' => $username,
+                    'title' => 'Aset Baru Berhasil Dibeli',
+                    'message' => sprintf(
+                        'Aset "%s" senilai %s berhasil dibeli pada %s. Akun: %s. Kode: %s',
+                        $request->name,
+                        'Rp ' . number_format($request->value, 0, ',', '.'),
+                        Carbon::parse($request->purchase_date)->locale('id')->translatedFormat('d F Y'),
+                        $assetAccount->name,
+                        $code
+                    ),
+                    'is_read' => '0',
+                    'icon' => 'shopping_cart_2_line',
+                    'priority' => $request->value >= 10000000 ? 'high' : 'normal',
+                    'date' => now(),
+                    'publish' => '1'
+                ]);
+
+                // Generate attachment URL
+                $attachmentUrl = null;
+                if ($attachmentPath) {
+                    $attachmentUrl = GoogleCloudStorageHelper::getFileUrl($attachmentPath);
                 }
 
+                // Response
                 return response()->json([
                     'success' => true,
-                    'message' => 'Aset berhasil dibeli dan ditambahkan',
+                    'message' => 'Aset berhasil dibeli dan ditambahkan dengan jurnal otomatis',
                     'data' => [
-                        'id' => $newAsset->no,
-                        'code' => $newAsset->code,
-                        'name' => $newAsset->name,
-                        'category' => $newAsset->category_name,
-                        'brand' => $newAsset->brand,
-                        'vendor' => $newAsset->vendor,
-                        'value' => $newAsset->value,
-                        'formatted_value' => 'Rp ' . number_format($newAsset->value, 0, ',', '.'),
-                        'depreciation' => $newAsset->depreciation,
-                        'formatted_depreciation' => 'Rp ' . number_format($newAsset->depreciation, 0, ',', '.'),
-                        'location' => $newAsset->location,
-                        'economic_life' => $newAsset->economic_life,
-                        'date_purchase' => $newAsset->date_purchase,
-                        'purchased_with' => $newAsset->account_name,
-                        'date_created' => $newAsset->date_transaction,
-                        'picture' => $pictureUrl,
-                        'picture_path' => $picturePath
+                        'id' => $assetId,
+                        'code' => $code,
+                        'name' => $request->name,
+                        'value' => $request->value,
+                        'formatted_value' => 'Rp ' . number_format($request->value, 0, ',', '.'),
+                        'asset_account' => [
+                            'code' => $request->asset_account,
+                            'name' => $assetAccount->name
+                        ],
+                        'cash_account' => [
+                            'code' => $request->cash_account,
+                            'name' => $cashAccount->name
+                        ],
+                        'economic_life' => $request->economic_life,
+                        'purchase_date' => date('d M Y', strtotime($request->purchase_date)),
+                        'picture' => $attachmentUrl, // Backward compatibility
+                        'picture_path' => $attachmentPath,
+                        'attachment' => $attachmentUrl,
+                        'attachment_path' => $attachmentPath
                     ]
                 ], 201);
 
             } catch (\Exception $e) {
-                DB::rollback();
+                DB::rollBack();
                 throw $e;
             }
 
         } catch (\Exception $e) {
+            \Log::error('Error buying asset: ' . $e->getMessage());
             return response()->json([
                 'success' => false,
                 'message' => 'Gagal membeli aset: ' . $e->getMessage(),
+                'error_detail' => $e->getTraceAsString()
+            ], 500);
+        }
+    }
+    public function getAssetAccounts()
+    {
+        try {
+            $username = auth()->user()->username;
+
+            // Hanya Akun Aset Tetap (2xx)
+            $assetAccounts = DB::table('keu_account')
+                ->where('username', $username)
+                ->where('code_account_category', '2') // Aktiva Tetap
+                ->where('publish', '1')
+                ->orderBy('code', 'asc')
+                ->get()
+                ->map(function ($account) {
+                    return [
+                        'code' => $account->code,
+                        'name' => $account->code . ' - ' . $account->name,
+                        'description' => $account->description ?? ''
+                    ];
+                });
+
+            return response()->json([
+                'success' => true,
+                'data' => $assetAccounts,
+                'message' => 'Data akun aset berhasil dimuat'
+            ], 200);
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Gagal memuat data akun aset: ' . $e->getMessage(),
                 'error_detail' => $e->getTraceAsString()
             ], 500);
         }
@@ -768,38 +896,36 @@ class AsetController extends Controller
     {
         try {
             $username = auth()->user()->username;
-            $allowedAccountCodes = [
-                '101',
-                '102',
-                '103',
-                '104',
-            ];
 
+            // PERBAIKAN: Gunakan filter cash_and_bank = '1' bukan hardcode
             $accounts = DB::table('keu_account')
                 ->select('code', 'name', 'balance', 'type', 'cash_and_bank')
                 ->where('username', $username)
                 ->where('publish', '1')
-                ->whereIn('code', $allowedAccountCodes)
-                ->orderBy('name', 'asc')
+                ->where('code_account_category', '1') // Aktiva Lancar
+                ->where('cash_and_bank', '1') // Filter berdasarkan kolom cash_and_bank
+                ->orderBy('code', 'asc')
                 ->get()
                 ->map(function ($account) {
                     $account->formatted_balance = 'Rp ' . number_format($account->balance, 0, ',', '.');
-                    switch ($account->code) {
-                        case '101':
-                            $account->account_type = 'Kas';
-                            break;
-                        case '102':
-                        case '103':
-                            $account->account_type = 'Bank';
-                            break;
-                        case '104':
-                            $account->account_type = 'Piutang';
-                            break;
-                        default:
-                            $account->account_type = 'Lainnya';
+
+                    // Tentukan tipe akun berdasarkan nama atau kode
+                    if (stripos($account->name, 'kas') !== false || $account->code == '101') {
+                        $account->account_type = 'Kas';
+                    } elseif (stripos($account->name, 'bank') !== false || in_array($account->code, ['102', '103'])) {
+                        $account->account_type = 'Bank';
+                    } else {
+                        $account->account_type = 'Kas/Bank';
                     }
 
-                    return $account;
+                    return [
+                        'code' => $account->code,
+                        'name' => $account->code . ' - ' . $account->name,
+                        'balance' => $account->balance,
+                        'formatted_balance' => $account->formatted_balance,
+                        'account_type' => $account->account_type,
+                        'description' => ''
+                    ];
                 });
 
             return response()->json([
@@ -811,11 +937,11 @@ class AsetController extends Controller
         } catch (\Exception $e) {
             return response()->json([
                 'success' => false,
-                'message' => 'Gagal memuat akun pembayaran: ' . $e->getMessage()
+                'message' => 'Gagal memuat akun pembayaran: ' . $e->getMessage(),
+                'error_detail' => $e->getTraceAsString()
             ], 500);
         }
     }
-
     public function getCategoryAset($no)
     {
         try {
@@ -1952,7 +2078,7 @@ class AsetController extends Controller
                 try {
                     Storage::disk('gcs')->delete($documentPath);
                 } catch (\Exception $e) {
-                   
+
                 }
 
                 unset($attachments[$documentIndex]);

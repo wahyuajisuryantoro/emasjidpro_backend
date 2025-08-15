@@ -94,11 +94,8 @@ class LaporanPendapatanBebanController extends Controller
                 }
             }
 
-            // Sort by account code
             ksort($pendapatanSummary);
             ksort($bebanSummary);
-
-            // Calculate surplus/deficit
             $labaRugi = $totalPendapatan - $totalBeban;
             $isLabaRugiPositif = $labaRugi >= 0;
 

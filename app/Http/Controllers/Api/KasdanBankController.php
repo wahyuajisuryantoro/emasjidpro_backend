@@ -17,77 +17,120 @@ class KasdanBankController extends Controller
 {
     public function getDashboardKasdanBank()
     {
-        $username = auth()->user()->username;
-
-        $accounts = AkunKeuanganModel::where('username', $username)
-            ->where('code_account_category', '1')
-            ->where('cash_and_bank', '1')
-            ->where('publish', '1')
-            ->get();
-
-        $mappedAccounts = $accounts->map(function ($account) {
-            $type = (strpos(strtolower($account->name), 'kas') !== false) ? 'kas' : 'bank';
-
-            return [
-                'id' => $account->no,
-                'name' => $account->name,
-                'code' => $account->code,
-                'balance' => (double) $account->balance,
-                'type' => $type
-            ];
-        });
-
-        $totalBalance = $accounts->sum('balance');
-
-        $transactions = DB::table('keu_journal as kj')
-            ->select(
-                'kj.code',
-                'kj.date_transaction as date',
-                'kj.description',
-                DB::raw('MAX(CASE WHEN kj.status = "debit" THEN a1.name END) as toAccount'),
-                DB::raw('MAX(CASE WHEN kj.status = "credit" THEN a2.name END) as fromAccount'),
-                DB::raw('MAX(kj.value) as amount')
-            )
-            ->join('keu_account as a1', 'kj.account', '=', 'a1.code')
-            ->join('keu_account as a2', 'kj.account', '=', 'a2.code')
-            ->where('kj.username', $username)
-            ->where('a1.cash_and_bank', '1')
-            ->where('a2.cash_and_bank', '1')
-            ->where('kj.publish', '1')
-            ->groupBy('kj.code', 'kj.date_transaction', 'kj.description')
-            ->orderBy('kj.date_transaction', 'desc')
-            ->limit(10)
-            ->get();
-
-        $mappedTransactions = $transactions->map(function ($item) {
-            return [
-                'id' => $item->code,
-                'code' => $item->code,
-                'fromAccount' => $item->fromAccount,
-                'toAccount' => $item->toAccount,
-                'amount' => (double) $item->amount,
-                'date' => $item->date,
-                'description' => $item->description,
-                'status' => 'completed'
-            ];
-        });
-
-        return response()->json([
-            'success' => true,
-            'data' => [
-                'accounts' => $mappedAccounts,
-                'totalBalance' => $totalBalance,
-                'transactions' => $mappedTransactions
-            ]
-        ]);
-    }
-
-    public function getAllDataKasdanBank()
-    {
         try {
             $username = auth()->user()->username;
 
             // Ambil semua akun kas dan bank
+            $accounts = AkunKeuanganModel::where('username', $username)
+                ->where('code_account_category', '1')
+                ->where('cash_and_bank', '1')
+                ->where('publish', '1')
+                ->get();
+
+            $mappedAccounts = $accounts->map(function ($account) {
+                $type = (strpos(strtolower($account->name), 'kas') !== false) ? 'kas' : 'bank';
+
+                return [
+                    'id' => $account->no,
+                    'name' => $account->name,
+                    'code' => $account->code,
+                    'balance' => (double) $account->balance,
+                    'formatted_balance' => 'Rp ' . number_format($account->balance, 0, ',', '.'),
+                    'type' => $type
+                ];
+            });
+
+            $totalBalance = $accounts->sum('balance');
+
+            // Query yang sama dengan getAllDataKasdanBank tapi dengan limit 5
+            $transactions = DB::table('keu_journal as kj1')
+                ->select(
+                    'kj1.code',
+                    'kj1.date_transaction as date',
+                    'kj1.description',
+                    'kj1.value as amount',
+                    'debit_acc.code as to_account_code',
+                    'debit_acc.name as to_account_name',
+                    'credit_acc.code as from_account_code',
+                    'credit_acc.name as from_account_name'
+                )
+                ->join('keu_journal as kj2', function ($join) {
+                    $join->on('kj1.code', '=', 'kj2.code')
+                        ->where('kj1.status', '=', 'debit')
+                        ->where('kj2.status', '=', 'credit');
+                })
+                ->join('keu_account as debit_acc', 'kj1.account', '=', 'debit_acc.code')
+                ->join('keu_account as credit_acc', 'kj2.account', '=', 'credit_acc.code')
+                ->where('kj1.username', $username)
+                ->where('kj2.username', $username)
+                ->where('debit_acc.username', $username)
+                ->where('credit_acc.username', $username)
+                ->where('debit_acc.cash_and_bank', '1')    
+                ->where('credit_acc.cash_and_bank', '1')
+                ->where('kj1.publish', '1')
+                ->where('kj2.publish', '1')
+                ->orderBy('kj1.date_transaction', 'desc')
+                ->orderBy('kj1.code', 'desc')
+                ->limit(5)
+                ->get();
+
+            $mappedTransactions = $transactions->map(function ($transaction) {
+                $type = 'transfer'; 
+                $fromAccountName = strtolower($transaction->from_account_name);
+                $toAccountName = strtolower($transaction->to_account_name);
+
+                if (strpos($fromAccountName, 'kas') !== false && strpos($toAccountName, 'bank') !== false) {
+                    $type = 'setor'; // Kas ke Bank
+                } elseif (strpos($fromAccountName, 'bank') !== false && strpos($toAccountName, 'kas') !== false) {
+                    $type = 'tarik'; // Bank ke Kas
+                } elseif (strpos($fromAccountName, 'bank') !== false && strpos($toAccountName, 'bank') !== false) {
+                    $type = 'transfer'; // Bank ke Bank
+                }
+
+                return [
+                    'id' => $transaction->code,
+                    'code' => $transaction->code,
+                    'fromAccount' => $transaction->from_account_name,
+                    'toAccount' => $transaction->to_account_name,
+                    'from_account' => [
+                        'code' => $transaction->from_account_code,
+                        'name' => $transaction->from_account_name
+                    ],
+                    'to_account' => [
+                        'code' => $transaction->to_account_code,
+                        'name' => $transaction->to_account_name
+                    ],
+                    'amount' => (double) $transaction->amount,
+                    'formatted_amount' => 'Rp ' . number_format($transaction->amount, 0, ',', '.'),
+                    'date' => $transaction->date,
+                    'description' => $transaction->description,
+                    'type' => $type,
+                    'status' => 'completed'
+                ];
+            });
+
+            return response()->json([
+                'success' => true,
+                'data' => [
+                    'accounts' => $mappedAccounts,
+                    'totalBalance' => $totalBalance,
+                    'formatted_total_balance' => 'Rp ' . number_format($totalBalance, 0, ',', '.'),
+                    'transactions' => $mappedTransactions
+                ],
+                'message' => 'Dashboard kas dan bank berhasil dimuat'
+            ], 200);
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Gagal memuat dashboard kas dan bank: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+    public function getAllDataKasdanBank()
+    {
+        try {
+            $username = auth()->user()->username;
             $accounts = AkunKeuanganModel::where('username', $username)
                 ->where('code_account_category', '1')
                 ->where('cash_and_bank', '1')
@@ -107,67 +150,91 @@ class KasdanBankController extends Controller
                     'formatted_balance' => 'Rp ' . number_format($account->balance, 0, ',', '.')
                 ];
             });
-
-            // Hitung total saldo
             $totalBalance = $accounts->sum('balance');
-
-            // Ambil semua transaksi kas dan bank (journal entries)
-            $transactions = DB::table('keu_journal as kj')
+            $kasAndBankCodes = $accounts->pluck('code')->toArray();
+            $transactions = DB::table('keu_journal as kj1')
                 ->select(
-                    'kj.code',
-                    'kj.date_transaction as date',
-                    'kj.description',
-                    'kj.value as amount',
-                    'kj.status',
-                    'kj.account',
-                    'kj.name as account_name'
+                    'kj1.code',
+                    'kj1.date_transaction as date',
+                    'kj1.description',
+                    'kj1.value as amount',
+                    'debit_acc.code as to_account_code',
+                    'debit_acc.name as to_account_name',
+                    'credit_acc.code as from_account_code',
+                    'credit_acc.name as from_account_name'
                 )
-                ->join('keu_account as ka', 'kj.account', '=', 'ka.code')
-                ->where('kj.username', $username)
-                ->where('ka.cash_and_bank', '1')
-                ->where('kj.publish', '1')
-                ->orderBy('kj.date_transaction', 'desc')
-                ->orderBy('kj.code', 'desc')
+                ->join('keu_journal as kj2', function ($join) {
+                    $join->on('kj1.code', '=', 'kj2.code')
+                        ->where('kj1.status', '=', 'debit')
+                        ->where('kj2.status', '=', 'credit');
+                })
+                ->join('keu_account as debit_acc', 'kj1.account', '=', 'debit_acc.code')
+                ->join('keu_account as credit_acc', 'kj2.account', '=', 'credit_acc.code')
+                ->where('kj1.username', $username)
+                ->where('kj2.username', $username)
+                ->where('debit_acc.username', $username)
+                ->where('credit_acc.username', $username)
+                ->where('debit_acc.cash_and_bank', '1')
+                ->where('credit_acc.cash_and_bank', '1')
+                ->where('kj1.publish', '1')
+                ->where('kj2.publish', '1')
+                ->orderBy('kj1.date_transaction', 'desc')
+                ->orderBy('kj1.code', 'desc')
                 ->get();
+            $mappedTransactions = $transactions->map(function ($transaction) {
+                $type = 'transfer';
+                $fromAccountName = strtolower($transaction->from_account_name);
+                $toAccountName = strtolower($transaction->to_account_name);
 
-            // Group transaksi berdasarkan code untuk mendapatkan transfer
-            $groupedTransactions = $transactions->groupBy('code')->map(function ($items) {
-                $debit = $items->where('status', 'debit')->first();
-                $credit = $items->where('status', 'credit')->first();
+                if (strpos($fromAccountName, 'kas') !== false && strpos($toAccountName, 'bank') !== false) {
+                    $type = 'setor';
+                } elseif (strpos($fromAccountName, 'bank') !== false && strpos($toAccountName, 'kas') !== false) {
+                    $type = 'tarik';
+                } elseif (strpos($fromAccountName, 'bank') !== false && strpos($toAccountName, 'bank') !== false) {
+                    $type = 'transfer';
+                }
 
                 return [
-                    'code' => $items->first()->code,
-                    'date' => $items->first()->date,
-                    'description' => $items->first()->description,
-                    'amount' => (double) $items->first()->amount,
-                    'formatted_amount' => 'Rp ' . number_format($items->first()->amount, 0, ',', '.'),
-                    'from_account' => $credit ? [
-                        'code' => $credit->account,
-                        'name' => $credit->account_name
-                    ] : null,
-                    'to_account' => $debit ? [
-                        'code' => $debit->account,
-                        'name' => $debit->account_name
-                    ] : null,
-                    'type' => $this->determineTransactionType($debit, $credit)
+                    'code' => $transaction->code,
+                    'date' => $transaction->date,
+                    'description' => $transaction->description,
+                    'amount' => (double) $transaction->amount,
+                    'formatted_amount' => 'Rp ' . number_format($transaction->amount, 0, ',', '.'),
+                    'from_account' => [
+                        'code' => $transaction->from_account_code,
+                        'name' => $transaction->from_account_name
+                    ],
+                    'to_account' => [
+                        'code' => $transaction->to_account_code,
+                        'name' => $transaction->to_account_name
+                    ],
+                    'type' => $type
                 ];
-            })->values();
-
-            // Statistik bulanan
+            });
             $currentMonth = now()->month;
             $currentYear = now()->year;
 
-            $monthlyStats = DB::table('keu_journal as kj')
-                ->join('keu_account as ka', 'kj.account', '=', 'ka.code')
-                ->where('kj.username', $username)
-                ->where('ka.cash_and_bank', '1')
-                ->where('kj.publish', '1')
-                ->whereMonth('kj.date_transaction', $currentMonth)
-                ->whereYear('kj.date_transaction', $currentYear)
+            $monthlyStats = DB::table('keu_journal as kj1')
+                ->join('keu_journal as kj2', function ($join) {
+                    $join->on('kj1.code', '=', 'kj2.code')
+                        ->where('kj1.status', '=', 'debit')
+                        ->where('kj2.status', '=', 'credit');
+                })
+                ->join('keu_account as debit_acc', 'kj1.account', '=', 'debit_acc.code')
+                ->join('keu_account as credit_acc', 'kj2.account', '=', 'credit_acc.code')
+                ->where('kj1.username', $username)
+                ->where('kj2.username', $username)
+                ->where('debit_acc.username', $username)
+                ->where('credit_acc.username', $username)
+                ->where('debit_acc.cash_and_bank', '1')
+                ->where('credit_acc.cash_and_bank', '1')
+                ->where('kj1.publish', '1')
+                ->where('kj2.publish', '1')
+                ->whereMonth('kj1.date_transaction', $currentMonth)
+                ->whereYear('kj1.date_transaction', $currentYear)
                 ->selectRaw('
-                COUNT(DISTINCT kj.code) as total_transactions,
-                SUM(CASE WHEN kj.status = "debit" THEN kj.value ELSE 0 END) as total_debit,
-                SUM(CASE WHEN kj.status = "credit" THEN kj.value ELSE 0 END) as total_credit
+                COUNT(DISTINCT kj1.code) as total_transactions,
+                SUM(kj1.value) as total_amount
             ')
                 ->first();
 
@@ -177,14 +244,12 @@ class KasdanBankController extends Controller
                     'accounts' => $mappedAccounts,
                     'total_balance' => (double) $totalBalance,
                     'formatted_total_balance' => 'Rp ' . number_format($totalBalance, 0, ',', '.'),
-                    'transactions' => $groupedTransactions,
+                    'transactions' => $mappedTransactions,
                     'monthly_stats' => [
                         'month' => now()->locale('id')->translatedFormat('F Y'),
                         'total_transactions' => (int) $monthlyStats->total_transactions ?? 0,
-                        'total_debit' => (double) $monthlyStats->total_debit ?? 0,
-                        'total_credit' => (double) $monthlyStats->total_credit ?? 0,
-                        'formatted_total_debit' => 'Rp ' . number_format($monthlyStats->total_debit ?? 0, 0, ',', '.'),
-                        'formatted_total_credit' => 'Rp ' . number_format($monthlyStats->total_credit ?? 0, 0, ',', '.')
+                        'total_amount' => (double) $monthlyStats->total_amount ?? 0,
+                        'formatted_total_amount' => 'Rp ' . number_format($monthlyStats->total_amount ?? 0, 0, ',', '.')
                     ]
                 ],
                 'message' => 'Data kas dan bank berhasil dimuat'
@@ -965,25 +1030,98 @@ class KasdanBankController extends Controller
         }
     }
 
-    private function determineTransactionType($debit, $credit)
+    private function determineTransactionType($debit, $credit, $kasCode = null)
     {
+        $username = auth()->user()->username;
+
+        // Ambil semua kode akun kas dan bank untuk user ini
+        $kasAndBankCodes = DB::table('keu_account')
+            ->where('username', $username)
+            ->where('cash_and_bank', '1')
+            ->where('publish', '1')
+            ->pluck('code')
+            ->toArray();
+
+        // Jika kasCode tidak diberikan, cari otomatis
+        if (!$kasCode) {
+            $kasCode = DB::table('keu_account')
+                ->where('username', $username)
+                ->where('cash_and_bank', '1')
+                ->where('publish', '1')
+                ->whereRaw('LOWER(name) LIKE "%kas%"')
+                ->value('code');
+        }
+
+        // Jika salah satu null, analisa yang ada
+        if (!$debit && $credit) {
+            // Hanya ada credit (uang keluar dari akun)
+            if (!in_array($credit->account, $kasAndBankCodes)) {
+                return 'other'; // Bukan transaksi kas/bank
+            }
+
+            if ($credit->account == $kasCode) {
+                return 'kas_keluar'; // Uang keluar dari kas
+            } else {
+                return 'bank_keluar'; // Uang keluar dari bank
+            }
+        }
+
+        if (!$credit && $debit) {
+            // Hanya ada debit (uang masuk ke akun)
+            if (!in_array($debit->account, $kasAndBankCodes)) {
+                return 'other'; // Bukan transaksi kas/bank
+            }
+
+            if ($debit->account == $kasCode) {
+                return 'kas_masuk'; // Uang masuk ke kas
+            } else {
+                return 'bank_masuk'; // Uang masuk ke bank
+            }
+        }
+
+        // Jika kedua-duanya null
         if (!$debit || !$credit) {
             return 'unknown';
         }
 
-        // Kas (101) ke Bank atau sebaliknya
-        if (
-            ($credit->account == '101' && $debit->account != '101') ||
-            ($debit->account == '101' && $credit->account != '101')
-        ) {
-            return $credit->account == '101' ? 'setor' : 'tarik';
+        // Cek apakah keduanya termasuk akun kas dan bank
+        $creditIsKasBank = in_array($credit->account, $kasAndBankCodes);
+        $debitIsKasBank = in_array($debit->account, $kasAndBankCodes);
+
+        // Jika salah satu bukan kas/bank, ini bukan transaksi kas/bank internal
+        if (!$creditIsKasBank || !$debitIsKasBank) {
+            // Tapi tetap cek apakah ini transaksi yang melibatkan kas/bank
+            if ($creditIsKasBank) {
+                return ($credit->account == $kasCode) ? 'kas_keluar' : 'bank_keluar';
+            }
+            if ($debitIsKasBank) {
+                return ($debit->account == $kasCode) ? 'kas_masuk' : 'bank_masuk';
+            }
+            return 'other';
         }
 
-        // Bank ke Bank
-        if ($credit->account != '101' && $debit->account != '101') {
+        // Keduanya adalah akun kas/bank, tentukan jenis transfer
+
+        // Transfer dari kas ke bank (setor)
+        if ($credit->account == $kasCode && $debit->account != $kasCode) {
+            return 'setor';
+        }
+
+        // Transfer dari bank ke kas (tarik)
+        if ($debit->account == $kasCode && $credit->account != $kasCode) {
+            return 'tarik';
+        }
+
+        // Transfer antar bank (bukan kas)
+        if ($credit->account != $kasCode && $debit->account != $kasCode) {
             return 'transfer';
         }
 
-        return 'other';
+        // Transfer internal kas (jarang terjadi)
+        if ($credit->account == $kasCode && $debit->account == $kasCode) {
+            return 'kas_internal';
+        }
+
+        return 'internal';
     }
 }

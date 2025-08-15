@@ -14,12 +14,9 @@ class NeracaSaldoController extends Controller
     {
         try {
             $username = auth()->user()->username;
+            $includeSystemDebt = $request->input('include_system_debt', true); 
+            $includeSystemReceivable = $request->input('include_system_receivable', true); 
             
-            // Parameter untuk mengontrol integrasi data hutang/piutang
-            $includeSystemDebt = $request->input('include_system_debt', true); // default true
-            $includeSystemReceivable = $request->input('include_system_receivable', true); // default true
-            
-            // Get accounts - hanya akun untuk neraca (NL dan NR)
             $accounts = DB::table('keu_account as a')
                 ->join('keu_account_category as c', 'a.code_account_category', '=', 'c.code')
                 ->where(function($query) use ($username) {
@@ -35,13 +32,9 @@ class NeracaSaldoController extends Controller
                 )
                 ->orderBy('a.code', 'asc')
                 ->get();
-
-            // Get journal data dari awal tahun sampai hari ini
-            // PERBAIKAN: Exclude jurnal hutang/piutang untuk menghindari double counting
             $startOfYear = Carbon::createFromDate(date('Y'), 1, 1)->startOfDay();
             $today = Carbon::now()->endOfDay();
-            
-            // Ambil semua kode transaksi hutang dan piutang
+
             $hutangCodes = DB::table('keu_debt')
                 ->where(function($query) use ($username) {
                     $query->where('username', $username)
@@ -77,8 +70,7 @@ class NeracaSaldoController extends Controller
                 ->where('publish', '1')
                 ->pluck('code')
                 ->toArray();
-            
-            // Gabungkan semua kode yang harus di-exclude
+        
             $excludeCodes = array_merge($hutangCodes, $piutangCodes, $cicilanHutangCodes, $cicilanPiutangCodes);
             
             $journals = DB::table('keu_journal')
@@ -88,12 +80,10 @@ class NeracaSaldoController extends Controller
                 })
                 ->where('publish', '1')
                 ->whereBetween('date_transaction', [$startOfYear, $today])
-                ->whereNotIn('code', $excludeCodes) // EXCLUDE jurnal hutang/piutang
+                ->whereNotIn('code', $excludeCodes)
                 ->get();
             
             $journalsByAccount = $journals->groupBy('account');
-
-            // Get assets data for Aktiva Tetap - ambil SEMUA aset (tidak ada filter periode)
             $assets = DB::table('keu_asset')
                 ->where(function($query) use ($username) {
                     $query->where('username', $username)
@@ -103,14 +93,8 @@ class NeracaSaldoController extends Controller
                 ->get();
                 
             $assetsByAccount = $assets->groupBy('account_related');
-
-            // GET HUTANG DATA - Ambil data hutang aktual dari tabel keu_debt
             $dataHutang = $this->getHutangData($username);
-            
-            // GET PIUTANG DATA - Ambil data piutang aktual dari tabel keu_receivable
             $dataPiutang = $this->getPiutangData($username);
-
-            // DETEKSI AKUN PIUTANG DAN HUTANG SECARA DINAMIS
             $piutangAccounts = $this->detectPiutangAccounts($username);
             $hutangAccounts = $this->detectHutangAccounts($username);
 
@@ -127,18 +111,11 @@ class NeracaSaldoController extends Controller
             foreach ($accounts as $account) {
                 $accountCode = $account->code;
                 $saldoAwal = $account->balance;
-                
-                // Get journals for this account
                 $accountJournals = $journalsByAccount->get($accountCode, collect());
-                
-                // Calculate total debit and credit for this account
                 $totalDebit = $accountJournals->where('status', 'debit')->sum('value');
                 $totalCredit = $accountJournals->where('status', 'credit')->sum('value');
-
-                // Calculate balance based on account type
                 if ($account->category_type == 'NL') { // Aktiva
                     if ($account->code_account_category == '2') { 
-                        // Aktiva Tetap - ambil dari keu_asset berdasarkan account_related
                         $accountAssets = $assetsByAccount->get($accountCode, collect());
                         $totalAssetValue = $accountAssets->sum('value');
                         $totalDepreciation = $accountAssets->sum('depreciation');
@@ -153,8 +130,6 @@ class NeracaSaldoController extends Controller
                     } else {
                         // Aktiva Lancar - hitung dari saldo awal + mutasi jurnal
                         $saldoAkhir = $saldoAwal + $totalDebit - $totalCredit;
-                        
-                        // TAMBAHAN: Jika ada aset yang salah menunjuk ke akun aktiva lancar
                         $accountAssets = $assetsByAccount->get($accountCode, collect());
                         if ($accountAssets->count() > 0) {
                             $totalAssetValue = $accountAssets->sum('value');
@@ -162,11 +137,7 @@ class NeracaSaldoController extends Controller
                             $netAssetValue = $totalAssetValue - $totalDepreciation;
                             $saldoAkhir += $netAssetValue;
                         }
-                        
-                        // DINAMIS: Handle piutang dengan deteksi konflik
                         if (in_array($accountCode, $piutangAccounts) && $includeSystemReceivable) {
-                            // SELALU gunakan data system untuk akun piutang
-                            // karena jurnal piutang sudah di-exclude
                             $saldoAkhir += $dataPiutang['total_piutang_bersih'];
                         }
                         
@@ -183,12 +154,8 @@ class NeracaSaldoController extends Controller
                 } else { // NR (Pasiva) - semua dihitung dari jurnal
                     // NR (Pasiva): saldo_awal + credit - debit
                     $saldoAkhir = $saldoAwal + $totalCredit - $totalDebit;
-                    
-                    // DINAMIS: Handle hutang dengan deteksi konflik
                     if ($account->code_account_category == '3') { // Kewajiban
                         if (isset($hutangAccounts[$accountCode]) && $includeSystemDebt) {
-                            // SELALU gunakan data system untuk akun hutang
-                            // karena jurnal hutang sudah di-exclude
                             $saldoAkhir += $hutangAccounts[$accountCode];
                         }
                         
@@ -243,12 +210,8 @@ class NeracaSaldoController extends Controller
         }
     }
 
-    /**
-     * Deteksi akun piutang secara dinamis berdasarkan data aktual di keu_receivable
-     */
     private function detectPiutangAccounts($username)
     {
-        // Ambil semua akun yang digunakan di tabel keu_receivable
         $piutangAccounts = DB::table('keu_receivable')
             ->where('username', $username)
             ->where('publish', '1')
@@ -260,12 +223,8 @@ class NeracaSaldoController extends Controller
         return $piutangAccounts;
     }
 
-    /**
-     * Deteksi akun hutang secara dinamis dan hitung sisa hutang per akun
-     */
     private function detectHutangAccounts($username)
     {
-        // Ambil data hutang dan kelompokkan per akun
         $dataHutang = DB::table('keu_debt')
             ->select('code', 'value', 'account')
             ->where('username', $username)
@@ -276,7 +235,6 @@ class NeracaSaldoController extends Controller
         $hutangPerAkun = [];
 
         foreach ($dataHutang as $hutang) {
-            // Hitung pembayaran yang sudah dilakukan
             $pembayaran = DB::table('keu_debt_installment')
                 ->where('username', $username)
                 ->where('code_debt', $hutang->code)
@@ -284,8 +242,6 @@ class NeracaSaldoController extends Controller
                 ->sum('value');
 
             $sisaHutang = $hutang->value - $pembayaran;
-            
-            // Kelompokkan per akun
             if (!isset($hutangPerAkun[$hutang->account])) {
                 $hutangPerAkun[$hutang->account] = 0;
             }
@@ -295,12 +251,8 @@ class NeracaSaldoController extends Controller
         return $hutangPerAkun;
     }
 
-    /**
-     * Hitung total hutang untuk keperluan debug dan informasi umum
-     */
     private function getHutangData($username)
     {
-        // Ambil semua data hutang
         $dataHutang = DB::table('keu_debt')
             ->select('code', 'value', 'account')
             ->where('username', $username)
@@ -313,8 +265,6 @@ class NeracaSaldoController extends Controller
 
         foreach ($dataHutang as $hutang) {
             $totalHutangBruto += $hutang->value;
-
-            // Hitung pembayaran yang sudah dilakukan
             $pembayaran = DB::table('keu_debt_installment')
                 ->where('username', $username)
                 ->where('code_debt', $hutang->code)
@@ -330,13 +280,8 @@ class NeracaSaldoController extends Controller
             'total_hutang_bersih' => $totalHutangBruto - $totalHutangTerbayar,
         ];
     }
-
-    /**
-     * Hitung total piutang untuk keperluan debug dan informasi umum
-     */
     private function getPiutangData($username)
     {
-        // Ambil semua data piutang
         $dataPiutang = DB::table('keu_receivable')
             ->select('code', 'value')
             ->where('username', $username)
@@ -349,8 +294,6 @@ class NeracaSaldoController extends Controller
 
         foreach ($dataPiutang as $piutang) {
             $totalPiutangBruto += $piutang->value;
-
-            // Hitung pembayaran yang sudah diterima
             $pembayaran = DB::table('keu_receivable_installment')
                 ->where('user', $username)
                 ->where('code_receivable', $piutang->code)

@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use Exception;
 use Illuminate\Http\Request;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use App\Http\Controllers\Controller;
 use Illuminate\Support\Facades\Auth;
@@ -60,6 +61,75 @@ class HomeController extends Controller
             return response()->json([
                 'status' => 'error',
                 'message' => 'Gagal memuat data masjid: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
+    public function getHomeData(Request $request)
+    {
+        try {
+            $username = auth()->user()->username;
+
+            $currentYear = Carbon::now()->year;
+            $currentMonth = Carbon::now()->month;
+            $lastMonth = Carbon::now()->subMonth()->month;
+            $lastMonthYear = Carbon::now()->subMonth()->year;
+            $pendapatanBulanIni = DB::table('keu_transaction')
+                ->where('username', $username)
+                ->where('status', 'debit')
+                ->where('account_category', '5')
+                ->where('publish', '1')
+                ->whereYear('date_transaction', $currentYear)
+                ->whereMonth('date_transaction', $currentMonth)
+                ->sum('value');
+
+            $pendapatanBulanLalu = DB::table('keu_transaction')
+                ->where('username', $username)
+                ->where('status', 'debit')
+                ->where('account_category', '5')
+                ->where('publish', '1')
+                ->whereYear('date_transaction', $lastMonthYear)
+                ->whereMonth('date_transaction', $lastMonth)
+                ->sum('value');
+
+            $pengeluaranBulanIni = DB::table('keu_transaction')
+                ->where('username', $username)
+                ->where('status', 'credit')
+                ->where('account_category', '6')
+                ->where('publish', '1')
+                ->whereYear('date_transaction', $currentYear)
+                ->whereMonth('date_transaction', $currentMonth)
+                ->sum('value');
+
+            $pengeluaranBulanLalu = DB::table('keu_transaction')
+                ->where('username', $username)
+                ->where('status', 'credit')
+                ->where('account_category', '6')
+                ->where('publish', '1')
+                ->whereYear('date_transaction', $lastMonthYear)
+                ->whereMonth('date_transaction', $lastMonth)
+                ->sum('value');
+
+            return response()->json([
+                'success' => true,
+                'data' => [
+                    'pendapatan' => [
+                        'bulan_ini' => 'Rp ' . number_format($pendapatanBulanIni, 0, ',', '.'),
+                        'bulan_lalu' => 'Rp ' . number_format($pendapatanBulanLalu, 0, ',', '.')
+                    ],
+                    'pengeluaran' => [
+                        'bulan_ini' => 'Rp ' . number_format($pengeluaranBulanIni, 0, ',', '.'),
+                        'bulan_lalu' => 'Rp ' . number_format($pengeluaranBulanLalu, 0, ',', '.')
+                    ],
+                    
+                ],
+                'message' => 'Data home berhasil dimuat'
+            ], 200);
+
+        } catch (Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Gagal memuat data home: ' . $e->getMessage()
             ], 500);
         }
     }

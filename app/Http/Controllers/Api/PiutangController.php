@@ -257,7 +257,7 @@ class PiutangController extends Controller
                 'due_date' => 'required|date',
                 'source_account' => 'required|string',
                 'destination_account' => 'required|string',
-                'attachment' => 'nullable|image|mimes:jpeg,png,jpg,pdf,doc,docx|max:5120', // 5MB max
+                'attachment' => 'nullable|image|mimes:jpeg,png,jpg,pdf,doc,docx|max:5120',
             ]);
 
             if ($validator->fails()) {
@@ -269,7 +269,33 @@ class PiutangController extends Controller
             }
 
             $username = auth()->user()->username;
+            $userName = auth()->user()->name ?? 'system';
             $subdomain = auth()->user()->subdomain ?? '';
+            $sourceAccount = DB::table('keu_account')
+                ->where('username', $username)
+                ->where('code', $request->source_account)
+                ->where('code_account_category', '1')
+                ->where('type', 'P')
+                ->first();
+
+            if (!$sourceAccount) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Akun piutang tidak valid (harus akun piutang 1xx)'
+                ], 404);
+            }
+            $destinationAccount = DB::table('keu_account')
+                ->where('username', $username)
+                ->where('code', $request->destination_account)
+                ->where('code', 'like', '3%')
+                ->first();
+
+            if (!$destinationAccount) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Akun kewajiban tidak valid'
+                ], 404);
+            }
 
             $lastPiutang = DB::table('keu_receivable')
                 ->where('username', $username)
@@ -287,26 +313,6 @@ class PiutangController extends Controller
 
             $newNumber = $lastNumber + 1;
             $code = 'R' . str_pad($newNumber, 3, '0', STR_PAD_LEFT);
-
-            $piutangData = [
-                'username' => $username,
-                'subdomain' => $subdomain,
-                'code' => $code,
-                'user' => $username,
-                'status' => 'debit',
-                'account_category' => substr($request->source_account, 0, 1),
-                'account' => $request->source_account,
-                'account_related' => $request->destination_account,
-                'name' => $request->name,
-                'link' => strtolower(str_replace(' ', '-', $request->name)),
-                'description' => $request->description,
-                'value' => $request->amount,
-                'date_deadline' => date('Y-m-d', strtotime($request->due_date)),
-                'date_transaction' => date('Y-m-d', strtotime($request->transaction_date)),
-                'date' => now(),
-                'publish' => '1'
-            ];
-
             $attachmentPath = '';
             if ($request->hasFile('attachment')) {
                 $file = $request->file('attachment');
@@ -321,76 +327,125 @@ class PiutangController extends Controller
                 }
             }
 
-            if ($attachmentPath) {
-                $piutangData['attachment'] = $attachmentPath;
-            }
+            DB::beginTransaction();
 
-            $piutangId = DB::table('keu_receivable')->insertGetId($piutangData);
-
-            DB::table('notifications')->insert([
-                'username' => $username,
-                'title' => 'Piutang Baru Ditambahkan',
-                'message' => sprintf(
-                    'Piutang "%s" sebesar %s berhasil dicatat pada %s. Jatuh tempo: %s. Kode piutang: %s',
-                    $request->name,
-                    'Rp ' . number_format($request->amount, 0, ',', '.'),
-                    Carbon::parse($request->transaction_date)->locale('id')->translatedFormat('d F Y'),
-                    Carbon::parse($request->due_date)->locale('id')->translatedFormat('d F Y'),
-                    $code
-                ),
-                'is_read' => '0',
-                'icon' => 'hand_money_line',
-                'priority' => $request->amount >= 5000000 ? 'high' : 'normal',
-                'date' => now(),
-                'publish' => '1'
-            ]);
-
-            $piutang = DB::table('keu_receivable')
-                ->where('no', $piutangId)
-                ->first();
-
-            $sourceAccountInfo = DB::table('keu_account')
-                ->where('code', $request->source_account)
-                ->where('username', $username)
-                ->first();
-
-            $destinationAccountInfo = DB::table('keu_account')
-                ->where('code', $request->destination_account)
-                ->where('username', $username)
-                ->first();
-
-            $attachmentUrl = null;
-            if ($attachmentPath) {
-                $attachmentUrl = GoogleCloudStorageHelper::getFileUrl($attachmentPath);
-            }
-
-            $response = [
-                'success' => true,
-                'data' => [
-                    'id' => $piutangId,
+            try {
+                $piutangData = [
+                    'username' => $username,
+                    'subdomain' => $subdomain,
                     'code' => $code,
+                    'user' => $userName,
+                    'status' => 'debit',
+                    'account_category' => substr($request->source_account, 0, 1),
+                    'account' => $request->source_account,
+                    'account_related' => $request->destination_account,
                     'name' => $request->name,
+                    'link' => strtolower(str_replace(' ', '-', $request->name)),
                     'description' => $request->description,
-                    'amount' => $request->amount,
-                    'formatted_amount' => 'Rp ' . number_format($request->amount, 0, ',', '.'),
-                    'transaction_date' => date('d M Y', strtotime($request->transaction_date)),
-                    'due_date' => date('d M Y', strtotime($request->due_date)),
-                    'source_account' => [
-                        'code' => $request->source_account,
-                        'name' => $sourceAccountInfo ? $sourceAccountInfo->name : 'Unknown'
-                    ],
-                    'destination_account' => [
-                        'code' => $request->destination_account,
-                        'name' => $destinationAccountInfo ? $destinationAccountInfo->name : 'Unknown'
-                    ],
-                    'attachment' => $attachmentUrl,
-                    'attachment_path' => $attachmentPath,
-                    'status' => 'Belum Lunas'
-                ],
-                'message' => 'Piutang berhasil ditambahkan'
-            ];
+                    'value' => $request->amount,
+                    'date_deadline' => date('Y-m-d', strtotime($request->due_date)),
+                    'date_transaction' => date('Y-m-d', strtotime($request->transaction_date)),
+                    'date' => now(),
+                    'publish' => '1'
+                ];
 
-            return response()->json($response, 201);
+                if ($attachmentPath) {
+                    $piutangData['attachment'] = $attachmentPath;
+                }
+
+                $piutangId = DB::table('keu_receivable')->insertGetId($piutangData);
+
+                // Buat jurnal otomatis
+                // Piutang (Debit) - Pendapatan/Kewajiban (Credit)
+
+                // Debit: Piutang bertambah
+                DB::table('keu_journal')->insert([
+                    'username' => $username,
+                    'subdomain' => $subdomain,
+                    'code' => $code,
+                    'user' => $userName,
+                    'status' => 'debit',
+                    'account' => $request->source_account,
+                    'name' => $sourceAccount->name,
+                    'description' => $request->description,
+                    'value' => $request->amount,
+                    'date_transaction' => date('Y-m-d', strtotime($request->transaction_date)),
+                    'date' => now(),
+                    'publish' => '1'
+                ]);
+
+                DB::table('keu_journal')->insert([
+                    'username' => $username,
+                    'subdomain' => $subdomain,
+                    'code' => $code,
+                    'user' => $userName,
+                    'status' => 'credit',
+                    'account' => $request->destination_account,
+                    'name' => $destinationAccount->name,
+                    'description' => $request->description,
+                    'value' => $request->amount,
+                    'date_transaction' => date('Y-m-d', strtotime($request->transaction_date)),
+                    'date' => now(),
+                    'publish' => '1'
+                ]);
+
+                DB::commit();
+
+                DB::table('notifications')->insert([
+                    'username' => $username,
+                    'title' => 'Piutang Baru Ditambahkan',
+                    'message' => sprintf(
+                        'Piutang "%s" sebesar %s berhasil dicatat pada %s. Jatuh tempo: %s. Kode piutang: %s',
+                        $request->name,
+                        'Rp ' . number_format($request->amount, 0, ',', '.'),
+                        Carbon::parse($request->transaction_date)->locale('id')->translatedFormat('d F Y'),
+                        Carbon::parse($request->due_date)->locale('id')->translatedFormat('d F Y'),
+                        $code
+                    ),
+                    'is_read' => '0',
+                    'icon' => 'hand_money_line',
+                    'priority' => $request->amount >= 5000000 ? 'high' : 'normal',
+                    'date' => now(),
+                    'publish' => '1'
+                ]);
+
+                $attachmentUrl = null;
+                if ($attachmentPath) {
+                    $attachmentUrl = GoogleCloudStorageHelper::getFileUrl($attachmentPath);
+                }
+
+                $response = [
+                    'success' => true,
+                    'data' => [
+                        'id' => $piutangId,
+                        'code' => $code,
+                        'name' => $request->name,
+                        'description' => $request->description,
+                        'amount' => $request->amount,
+                        'formatted_amount' => 'Rp ' . number_format($request->amount, 0, ',', '.'),
+                        'transaction_date' => date('d M Y', strtotime($request->transaction_date)),
+                        'due_date' => date('d M Y', strtotime($request->due_date)),
+                        'source_account' => [
+                            'code' => $request->source_account,
+                            'name' => $sourceAccount->name
+                        ],
+                        'destination_account' => [
+                            'code' => $request->destination_account,
+                            'name' => $destinationAccount->name
+                        ],
+                        'attachment' => $attachmentUrl,
+                        'attachment_path' => $attachmentPath,
+                        'status' => 'Belum Lunas'
+                    ],
+                    'message' => 'Piutang berhasil ditambahkan dengan jurnal otomatis'
+                ];
+
+                return response()->json($response, 201);
+
+            } catch (\Exception $e) {
+                DB::rollBack();
+                throw $e;
+            }
 
         } catch (\Exception $e) {
             return response()->json([
@@ -823,6 +878,7 @@ class PiutangController extends Controller
             }
 
             $username = auth()->user()->username;
+            $userName = auth()->user()->name ?? 'system';
             $subdomain = auth()->user()->subdomain ?? '';
 
             $piutang = DB::table('keu_receivable')
@@ -835,6 +891,20 @@ class PiutangController extends Controller
                 return response()->json([
                     'success' => false,
                     'message' => 'Data piutang tidak ditemukan'
+                ], 404);
+            }
+            $sourceAccount = DB::table('keu_account')
+                ->where('username', $username)
+                ->where('code', $request->source_account)
+                ->where('code_account_category', '1')
+                ->where('related', '1')
+                ->where('type', 'I')
+                ->first();
+
+            if (!$sourceAccount) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Akun kas/bank tidak valid'
                 ], 404);
             }
 
@@ -874,8 +944,6 @@ class PiutangController extends Controller
 
             $newNumber = $lastNumber + 1;
             $code = 'PR' . str_pad($newNumber, 3, '0', STR_PAD_LEFT);
-
-            // Upload attachment ke Google Cloud Storage
             $attachmentPath = '';
             if ($request->hasFile('attachment')) {
                 $file = $request->file('attachment');
@@ -890,92 +958,131 @@ class PiutangController extends Controller
                 }
             }
 
-            $cicilanData = [
-                'user' => $username,
-                'code' => $code,
-                'code_receivable' => $request->piutang_code,
-                'account_category' => substr($request->source_account, 0, 1),
-                'account' => $request->source_account,
-                'account_related' => $piutang->account_related,
-                'name' => $request->name,
-                'link' => 'penerimaan-piutang-' . $code,
-                'description' => $request->description,
-                'value' => $request->amount,
-                'date_transaction' => date('Y-m-d', strtotime($request->transaction_date)),
-                'date' => now(),
-                'publish' => '1'
-            ];
+            DB::beginTransaction();
 
-            if ($attachmentPath) {
-                $cicilanData['attachment'] = $attachmentPath;
-            }
-
-            $cicilanId = DB::table('keu_receivable_installment')->insertGetId($cicilanData);
-
-            $sisaPiutangSetelahCicilan = $sisaPiutang - $request->amount;
-            $statusPiutang = $sisaPiutangSetelahCicilan <= 0 ? 'LUNAS' : 'BELUM LUNAS';
-
-            // Insert notifikasi
-            DB::table('notifications')->insert([
-                'username' => $username,
-                'title' => 'Cicilan Piutang Diterima',
-                'message' => sprintf(
-                    'Cicilan piutang "%s" sebesar %s berhasil dicatat pada %s. Sisa piutang: %s. Status: %s',
-                    $piutang->name,
-                    'Rp ' . number_format($request->amount, 0, ',', '.'),
-                    Carbon::parse($request->transaction_date)->locale('id')->translatedFormat('d F Y'),
-                    'Rp ' . number_format($sisaPiutangSetelahCicilan, 0, ',', '.'),
-                    $statusPiutang
-                ),
-                'is_read' => '0',
-                'icon' => 'hand_money_line',
-                'priority' => $sisaPiutangSetelahCicilan <= 0 ? 'high' : 'normal',
-                'date' => now(),
-                'publish' => '1'
-            ]);
-
-            $newTotalCicilan = $totalCicilan + $request->amount;
-
-            $sourceAccountInfo = DB::table('keu_account')
-                ->where('code', $request->source_account)
-                ->where('username', $username)
-                ->first();
-
-            // Generate attachment URL
-            $attachmentUrl = null;
-            if ($attachmentPath) {
-                $attachmentUrl = GoogleCloudStorageHelper::getFileUrl($attachmentPath);
-            }
-
-            $response = [
-                'success' => true,
-                'data' => [
-                    'id' => $cicilanId,
+            try {
+                $cicilanData = [
+                    'user' => $username,
                     'code' => $code,
-                    'piutang_code' => $request->piutang_code,
+                    'code_receivable' => $request->piutang_code,
+                    'account_category' => substr($request->source_account, 0, 1),
+                    'account' => $request->source_account,
+                    'account_related' => $piutang->account,
                     'name' => $request->name,
+                    'link' => 'penerimaan-piutang-' . $code,
                     'description' => $request->description,
-                    'amount' => $request->amount,
-                    'formatted_amount' => 'Rp ' . number_format($request->amount, 0, ',', '.'),
-                    'transaction_date' => date('d M Y', strtotime($request->transaction_date)),
-                    'source_account' => [
-                        'code' => $request->source_account,
-                        'name' => $sourceAccountInfo ? $sourceAccountInfo->name : 'Unknown'
-                    ],
-                    'total_piutang' => $totalPiutang,
-                    'formatted_total_piutang' => 'Rp ' . number_format($totalPiutang, 0, ',', '.'),
-                    'total_cicilan' => $newTotalCicilan,
-                    'formatted_total_cicilan' => 'Rp ' . number_format($newTotalCicilan, 0, ',', '.'),
-                    'sisa_piutang' => $sisaPiutangSetelahCicilan,
-                    'formatted_sisa_piutang' => 'Rp ' . number_format($sisaPiutangSetelahCicilan, 0, ',', '.'),
-                    'status' => $sisaPiutangSetelahCicilan <= 0 ? 'Lunas' : 'Belum Lunas',
-                    'attachment' => $attachmentUrl,
-                    'attachment_path' => $attachmentPath
-                ],
-                'message' => 'Cicilan piutang berhasil ditambahkan'
-            ];
+                    'value' => $request->amount,
+                    'date_transaction' => date('Y-m-d', strtotime($request->transaction_date)),
+                    'date' => now(),
+                    'publish' => '1'
+                ];
 
-            return response()->json($response, 201);
+                if ($attachmentPath) {
+                    $cicilanData['attachment'] = $attachmentPath;
+                }
+
+                $cicilanId = DB::table('keu_receivable_installment')->insertGetId($cicilanData);
+
+                // Buat jurnal otomatis untuk pembayaran cicilan piutang
+                // Jurnal: Kas/Bank (Debit) - Piutang (Credit)
+
+                $piutangAccount = DB::table('keu_account')
+                    ->where('username', $username)
+                    ->where('code', $piutang->account)
+                    ->first();
+                DB::table('keu_journal')->insert([
+                    'username' => $username,
+                    'subdomain' => $subdomain,
+                    'code' => $code,
+                    'user' => $userName,
+                    'status' => 'debit',
+                    'account' => $request->source_account,
+                    'name' => $sourceAccount->name,
+                    'description' => $request->description,
+                    'value' => $request->amount,
+                    'date_transaction' => date('Y-m-d', strtotime($request->transaction_date)),
+                    'date' => now(),
+                    'publish' => '1'
+                ]);
+                DB::table('keu_journal')->insert([
+                    'username' => $username,
+                    'subdomain' => $subdomain,
+                    'code' => $code,
+                    'user' => $userName,
+                    'status' => 'credit',
+                    'account' => $piutang->account,
+                    'name' => $piutangAccount ? $piutangAccount->name : 'Piutang',
+                    'description' => $request->description,
+                    'value' => $request->amount,
+                    'date_transaction' => date('Y-m-d', strtotime($request->transaction_date)),
+                    'date' => now(),
+                    'publish' => '1'
+                ]);
+
+                DB::commit();
+
+                $sisaPiutangSetelahCicilan = $sisaPiutang - $request->amount;
+                $statusPiutang = $sisaPiutangSetelahCicilan <= 0 ? 'LUNAS' : 'BELUM LUNAS';
+
+                DB::table('notifications')->insert([
+                    'username' => $username,
+                    'title' => 'Cicilan Piutang Diterima',
+                    'message' => sprintf(
+                        'Cicilan piutang "%s" sebesar %s berhasil dicatat pada %s. Sisa piutang: %s. Status: %s',
+                        $piutang->name,
+                        'Rp ' . number_format($request->amount, 0, ',', '.'),
+                        Carbon::parse($request->transaction_date)->locale('id')->translatedFormat('d F Y'),
+                        'Rp ' . number_format($sisaPiutangSetelahCicilan, 0, ',', '.'),
+                        $statusPiutang
+                    ),
+                    'is_read' => '0',
+                    'icon' => 'hand_money_line',
+                    'priority' => $sisaPiutangSetelahCicilan <= 0 ? 'high' : 'normal',
+                    'date' => now(),
+                    'publish' => '1'
+                ]);
+
+                $newTotalCicilan = $totalCicilan + $request->amount;
+
+                $attachmentUrl = null;
+                if ($attachmentPath) {
+                    $attachmentUrl = GoogleCloudStorageHelper::getFileUrl($attachmentPath);
+                }
+
+                $response = [
+                    'success' => true,
+                    'data' => [
+                        'id' => $cicilanId,
+                        'code' => $code,
+                        'piutang_code' => $request->piutang_code,
+                        'name' => $request->name,
+                        'description' => $request->description,
+                        'amount' => $request->amount,
+                        'formatted_amount' => 'Rp ' . number_format($request->amount, 0, ',', '.'),
+                        'transaction_date' => date('d M Y', strtotime($request->transaction_date)),
+                        'source_account' => [
+                            'code' => $request->source_account,
+                            'name' => $sourceAccount->name
+                        ],
+                        'total_piutang' => $totalPiutang,
+                        'formatted_total_piutang' => 'Rp ' . number_format($totalPiutang, 0, ',', '.'),
+                        'total_cicilan' => $newTotalCicilan,
+                        'formatted_total_cicilan' => 'Rp ' . number_format($newTotalCicilan, 0, ',', '.'),
+                        'sisa_piutang' => $sisaPiutangSetelahCicilan,
+                        'formatted_sisa_piutang' => 'Rp ' . number_format($sisaPiutangSetelahCicilan, 0, ',', '.'),
+                        'status' => $sisaPiutangSetelahCicilan <= 0 ? 'Lunas' : 'Belum Lunas',
+                        'attachment' => $attachmentUrl,
+                        'attachment_path' => $attachmentPath
+                    ],
+                    'message' => 'Cicilan piutang berhasil ditambahkan dengan jurnal otomatis'
+                ];
+
+                return response()->json($response, 201);
+
+            } catch (\Exception $e) {
+                DB::rollBack();
+                throw $e;
+            }
 
         } catch (\Exception $e) {
             return response()->json([

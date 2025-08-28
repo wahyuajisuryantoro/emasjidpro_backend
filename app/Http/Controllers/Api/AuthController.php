@@ -18,20 +18,23 @@ class AuthController extends Controller
         $username = $request->username;
         $password = $request->password;
         $password_hashed = md5($password);
-
-        $user = User::where('username', $username)
-            ->where('password', $password_hashed)
-            ->first();
+        $user = User::where('username', $username)->first();
 
         if (!$user) {
             return response()->json([
                 'status' => 'error',
-                'message' => 'Username atau password salah'
+                'message' => 'Username tidak ditemukan',
+                'error_type' => 'username_not_found'
             ], 401);
         }
-
+        if ($user->password !== $password_hashed) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Password salah',
+                'error_type' => 'wrong_password'
+            ], 401);
+        }
         $token = $user->createToken('auth-token')->plainTextToken;
-
         $user->last_login = now();
         $user->last_ipaddress = $request->ip();
         $user->save();
@@ -66,7 +69,6 @@ class AuthController extends Controller
             'publish' => $user->publish
         ]);
     }
-
     public function logout(Request $request)
     {
         $request->user()->currentAccessToken()->delete();

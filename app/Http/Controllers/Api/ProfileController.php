@@ -77,7 +77,7 @@ class ProfileController extends Controller
                 throw new Exception('Google Cloud Storage upload failed: ' . $e->getMessage());
             }
 
-            $url = GoogleCloudStorageHelper::getFileUrl($filename); 
+            $url = GoogleCloudStorageHelper::getFileUrl($filename);
 
             $user->update([
                 'picture' => $filename
@@ -124,7 +124,13 @@ class ProfileController extends Controller
             }
             $updateData = [];
             $fillableFields = [
-                'name', 'email', 'phone', 'address', 'city', 'birth', 'sex'
+                'name',
+                'email',
+                'phone',
+                'address',
+                'city',
+                'birth',
+                'sex'
             ];
 
             foreach ($fillableFields as $field) {
@@ -164,13 +170,11 @@ class ProfileController extends Controller
         }
     }
 
-     
+
     public function updatePassword(Request $request)
     {
         try {
             $user = auth()->user();
-
-            
             $validator = Validator::make($request->all(), [
                 'current_password' => 'required|string',
                 'new_password' => 'required|string|min:8|confirmed',
@@ -190,33 +194,34 @@ class ProfileController extends Controller
                     'errors' => $validator->errors()
                 ], 422);
             }
-
-            
             if (md5($request->current_password) !== $user->password) {
                 return response()->json([
                     'success' => false,
                     'message' => 'Password saat ini tidak sesuai'
                 ], 422);
             }
-
-            
             if (md5($request->new_password) === $user->password) {
                 return response()->json([
                     'success' => false,
                     'message' => 'Password baru harus berbeda dari password saat ini'
                 ], 422);
             }
-
-            
             $user->update([
                 'password' => md5($request->new_password)
             ]);
-            $user->tokens()->delete();
-
-            return response()->json([
+            $response = response()->json([
                 'success' => true,
                 'message' => 'Password berhasil diperbarui. Silakan login ulang dengan password baru.'
             ], 200);
+            register_shutdown_function(function () use ($user) {
+                try {
+                    $user->tokens()->delete();
+                } catch (Exception $e) {
+                    \Log::error('Failed to delete tokens after password update: ' . $e->getMessage());
+                }
+            });
+
+            return $response;
 
         } catch (Exception $e) {
             \Log::error('Password update failed: ' . $e->getMessage());

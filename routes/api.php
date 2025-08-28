@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\Api\AkunKeuanganController;
 use App\Http\Controllers\Api\LaporanPendapatanBebanController;
 use App\Http\Controllers\Api\NeracaSaldoController;
 use Illuminate\Http\Request;
@@ -24,7 +25,7 @@ Route::post('/login', [AuthController::class, 'login']);
 Route::middleware('auth:sanctum')->group(function () {
     Route::post('/logout', [AuthController::class, 'logout']);
     Route::get('/data-masjid', [HomeController::class, 'getDataMasjid']);
-     Route::get('/home-data', [HomeController::class, 'getHomeData']);
+    Route::get('/home-data', [HomeController::class, 'getHomeData']);
     Route::get('/get-profile', [ProfileController::class, 'getProfile']);
     Route::post('/update-picture', [ProfileController::class, 'updatePictureProfile']);
     Route::post('/update-profile', [ProfileController::class, 'updateProfile']);
@@ -120,6 +121,9 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::delete('aset/{no}/delete-document/{documentIndex}', [AsetController::class, 'deleteAssetDocument']);
     Route::get('aset/{no}/documents', [AsetController::class, 'getAssetDocuments']);
 
+    Route::get('/akun-keuangan', [AkunKeuanganController::class, 'getAccountsKeuangan']);
+    Route::get('/akun-keuangan/categories', [AkunKeuanganController::class, 'getAccountCategories']);
+    Route::post('/akun-keuangan', [AkunKeuanganController::class, 'storeAccount']);
 
 
     Route::get('/notifications', [NotifikasiController::class, 'getNotification']);
